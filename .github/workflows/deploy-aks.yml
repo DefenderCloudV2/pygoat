@@ -44,6 +44,8 @@ jobs:
           docker push "$image"
           echo "IMAGE=$image" >> "$GITHUB_ENV"
 
+      - uses: azure/use-kubelogin@v1
+
       - name: Set AKS context
         uses: azure/aks-set-context@v4
         with:
