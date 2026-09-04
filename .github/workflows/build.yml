@@ -34,5 +34,6 @@ jobs:
         with:
           python-version: "3.9"
           cache: pip
-      - run: pip install --use-deprecated=legacy-resolver -r requirements.txt
+      - run: pip install "setuptools<61" wheel
+      - run: pip install --no-build-isolation --use-deprecated=legacy-resolver -r requirements.txt
       - run: python -m compileall -q pygoat

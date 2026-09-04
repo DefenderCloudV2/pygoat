@@ -12,7 +12,8 @@ ENV SQLITE_PATH /tmp/db.sqlite3
 
 # install dependencies
 COPY requirements.txt requirements.txt
-RUN pip install --use-deprecated=legacy-resolver -r requirements.txt
+RUN pip install "setuptools<61" wheel \
+    && pip install --no-build-isolation --use-deprecated=legacy-resolver -r requirements.txt
 
 # copy project
 COPY . /app/
