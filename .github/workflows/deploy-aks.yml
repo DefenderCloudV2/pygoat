@@ -60,6 +60,7 @@ jobs:
           SOURCE_CIDR: ${{ inputs.source_cidr || '0.0.0.0/0' }}
         run: |
           python -c "import ipaddress, os; ipaddress.ip_network(os.environ['SOURCE_CIDR'], strict=False)"
+          kubectl create namespace "$AKS_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
           sed -e "s|IMAGE_PLACEHOLDER|$IMAGE|g" -e "s|CIDR_PLACEHOLDER|$SOURCE_CIDR|g" k8s/pygoat.yaml |
             kubectl apply --namespace "$AKS_NAMESPACE" -f -
           kubectl rollout status deployment/pygoat --namespace "$AKS_NAMESPACE" --timeout=5m
