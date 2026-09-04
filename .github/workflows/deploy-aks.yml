@@ -1,0 +1,63 @@
+name: Deploy to test AKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_cidr:
+        description: Public IP/CIDR allowed to access PyGoat (for example, 203.0.113.10/32)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ACR_NAME: vbattinaacr
+  ACR_LOGIN_SERVER: vbattinaacr.azurecr.io
+  AKS_RESOURCE_GROUP: vbattina
+  AKS_CLUSTER: vbattinaaks
+  AKS_NAMESPACE: pygoat-test
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: aks-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: f0194850-2974-43f3-b7e8-95dd25db6edc
+          tenant-id: 8dfb4a51-363c-4e70-85b7-bc7c044e7c6a
+          subscription-id: 382e5809-f9ac-487a-a719-aa95c9fe36fb
+
+      - name: Build and push image
+        run: |
+          az acr login --name "$ACR_NAME"
+          image="$ACR_LOGIN_SERVER/pygoat:$GITHUB_SHA"
+          docker build --tag "$image" .
+          docker push "$image"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: v0.2.19
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+          use-kubelogin: true
+
+      - name: Deploy
+        env:
+          SOURCE_CIDR: ${{ inputs.source_cidr }}
+        run: |
+          python -c "import ipaddress, os; ipaddress.ip_network(os.environ['SOURCE_CIDR'], strict=False)"
+          sed -e "s|IMAGE_PLACEHOLDER|$IMAGE|g" -e "s|CIDR_PLACEHOLDER|$SOURCE_CIDR|g" k8s/pygoat.yaml |
+            kubectl apply --namespace "$AKS_NAMESPACE" -f -
+          kubectl rollout status deployment/pygoat --namespace "$AKS_NAMESPACE" --timeout=5m
+          kubectl get service pygoat --namespace "$AKS_NAMESPACE"
