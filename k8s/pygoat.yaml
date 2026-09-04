@@ -12,6 +12,13 @@ spec:
       labels:
         app: pygoat
     spec:
+      nodeSelector:
+        agentpool: userpool
+      tolerations:
+        - key: kubernetes.azure.com/scalesetpriority
+          operator: Equal
+          value: spot
+          effect: NoSchedule
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
