@@ -1,33 +1,26 @@
-FROM python:3.11.0b1-buster
-
+FROM python:3.8
 
 # set work directory
 WORKDIR /app
 
+# set environment variables
+RUN apt-get update
+RUN apt-get -y install dnsutils
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV SQLITE_PATH /tmp/db.sqlite3
 
-# dependencies for psycopg2
-RUN apt-get update && apt-get install --no-install-recommends -y dnsutils=1:9.11.5.P4+dfsg-5.1+deb10u11 libpq-dev=11.16-0+deb10u1 python3-dev=3.7.3-1 && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-
-# Install dependencies
-RUN python -m pip install --no-cache-dir pip==22.0.4
+# install dependencies
 COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install "setuptools<61" wheel \
+    && pip install --no-build-isolation --use-deprecated=legacy-resolver -r requirements.txt
 
 # copy project
 COPY . /app/
 
+RUN useradd --uid 10001 --create-home appuser
+USER 10001
 
-# install pygoat
 EXPOSE 8000
 
-
-RUN python3 /app/manage.py migrate
-WORKDIR /app
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers","6", "pygoat.wsgi"]
+CMD ["sh", "-c", "test -f \"$SQLITE_PATH\" || cp pygoat/db.sqlite3 \"$SQLITE_PATH\"; python3 pygoat/manage.py migrate --noinput && python3 pygoat/manage.py runserver 0.0.0.0:8000"]
