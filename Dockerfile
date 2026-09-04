@@ -22,4 +22,4 @@ USER 10001
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python3 pygoat/manage.py migrate --noinput && python3 pygoat/manage.py runserver 0.0.0.0:8000"]
+CMD ["sh", "-c", "test -f \"$SQLITE_PATH\" || cp pygoat/db.sqlite3 \"$SQLITE_PATH\"; python3 pygoat/manage.py migrate --noinput && python3 pygoat/manage.py runserver 0.0.0.0:8000"]

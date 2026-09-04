@@ -69,6 +69,8 @@ metadata:
 spec:
   type: LoadBalancer
   externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+    - CIDR_PLACEHOLDER
   selector:
     app: pygoat
   ports:
