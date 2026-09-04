@@ -638,8 +638,7 @@ def debug(request):
     response['Content-Type'] =  'text/plain'
     return response
 
-# Logging basic configuration
-logging.basicConfig(level=logging.DEBUG,filename='app.log')
+logging.basicConfig(level=logging.DEBUG)
 
 @authentication_decorator
 def a10_lab2(request):
