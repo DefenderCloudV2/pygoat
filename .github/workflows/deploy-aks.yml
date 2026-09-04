@@ -61,5 +61,5 @@ jobs:
           sed -e "s|IMAGE_PLACEHOLDER|$IMAGE|g" -e "s|CIDR_PLACEHOLDER|$SOURCE_CIDR|g" k8s/pygoat.yaml |
             kubectl apply --namespace "$AKS_NAMESPACE" -f -
           kubectl rollout status deployment/pygoat --namespace "$AKS_NAMESPACE" --timeout=5m ||
-            { kubectl get pods --namespace "$AKS_NAMESPACE"; kubectl describe pods --namespace "$AKS_NAMESPACE"; exit 1; }
+            { kubectl get nodes; kubectl get events --namespace "$AKS_NAMESPACE" --sort-by=.lastTimestamp; kubectl describe pods --namespace "$AKS_NAMESPACE"; exit 1; }
           kubectl get service pygoat --namespace "$AKS_NAMESPACE"
