@@ -1,0 +1,227 @@
+name: Container attestation and release
+
+on:
+  push:
+    tags:
+      - "attestation-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-attestation-release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-attest:
+    name: Build image archives and attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      artifact-id: ${{ steps.upload-attested.outputs.artifact-id }}
+      release-tag: ${{ steps.release-tag.outputs.tag }}
+    steps:
+      - name: Select release tag
+        id: release-tag
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/master ]]; then
+            echo "tag=attestation-v0.0.0-master-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^attestation-v[0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Run manually on master or use an attestation-v<version> tag."
+            exit 1
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Build once and export two image archives
+        run: |
+          set -euo pipefail
+          docker build --provenance=false --tag pygoat:non-attested .
+          mkdir -p "$RUNNER_TEMP/images/non-attested" "$RUNNER_TEMP/images/attested"
+          docker image save pygoat:non-attested |
+            gzip -n > "$RUNNER_TEMP/images/non-attested/pygoat-non-attested.tar.gz"
+          docker image tag pygoat:non-attested pygoat:attested
+          docker image save pygoat:attested |
+            gzip -n > "$RUNNER_TEMP/images/attested/pygoat-attested.tar.gz"
+          test "$(docker image inspect pygoat:non-attested --format '{{.Id}}')" = \
+            "$(docker image inspect pygoat:attested --format '{{.Id}}')"
+          for variant in non-attested attested; do
+            (
+              cd "$RUNNER_TEMP/images/$variant"
+              gzip -t "pygoat-$variant.tar.gz"
+              sha256sum "pygoat-$variant.tar.gz" > SHA256SUMS
+            )
+          done
+          # Different saved tags give distinct archive digests, but identical image layers.
+          baseline=$(cut -d ' ' -f 1 "$RUNNER_TEMP/images/non-attested/SHA256SUMS")
+          candidate=$(cut -d ' ' -f 1 "$RUNNER_TEMP/images/attested/SHA256SUMS")
+          test "$baseline" != "$candidate"
+          docker image load --input "$RUNNER_TEMP/images/attested/pygoat-attested.tar.gz"
+
+      - name: Upload non-attested image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-image-non-attested
+          path: ${{ runner.temp }}/images/non-attested/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Attest the downloadable image archive
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/images/attested/pygoat-attested.tar.gz
+
+      - name: Preserve and verify the attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/images/attested"
+          cp "$BUNDLE_PATH" pygoat-attested.sigstore.json
+          policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/container-attestation-release.yml"
+            --source-digest "$GITHUB_SHA"
+            --source-ref "$GITHUB_REF"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify pygoat-attested.tar.gz "${policy[@]}" \
+            --bundle pygoat-attested.sigstore.json
+          gh attestation verify pygoat-attested.tar.gz "${policy[@]}"
+          if gh attestation verify ../non-attested/pygoat-non-attested.tar.gz \
+            "${policy[@]}" --bundle pygoat-attested.sigstore.json; then
+            echo "::error::The non-attested archive unexpectedly matched the attestation."
+            exit 1
+          fi
+          {
+            echo "## Container attestation"
+            echo
+            echo "Source commit: \`$GITHUB_SHA\`"
+            echo "Source ref: \`$GITHUB_REF\`"
+            echo "Release tag: \`$RELEASE_TAG\`"
+            echo
+            echo "Both archives contain the same image layers, saved with different Docker tags."
+            echo "Only the SHA-256 digest of \`pygoat-attested.tar.gz\` is attested."
+            echo "Verification passed using the saved bundle and the GitHub attestations API."
+            echo "The non-attested archive was rejected by that bundle."
+            echo
+            echo "PyGoat is intentionally vulnerable. Provenance is not a security endorsement."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload attested image and verification bundle
+        id: upload-attested
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-image-attested
+          path: ${{ runner.temp }}/images/attested/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  release:
+    name: Verify downloaded image and publish prerelease
+    needs: build-and-attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - name: Download this run's attested artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          artifact-ids: ${{ needs.build-and-attest.outputs.artifact-id }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check SHA256SUMS
+          gh attestation verify pygoat-attested.tar.gz \
+            --bundle pygoat-attested.sigstore.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/container-attestation-release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners
+
+      - name: Publish learning prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-and-attest.outputs.release-tag }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          ## Container attestation learning release
+
+          **PyGoat is intentionally vulnerable. Use only in an isolated learning environment.**
+          This prerelease demonstrates provenance and integrity, not security certification.
+
+          Source commit: $GITHUB_SHA
+          Source ref: $GITHUB_REF
+          Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          The run contains both \`container-image-non-attested\` and
+          \`container-image-attested\` artifacts. Both contain the same image layers,
+          saved with different Docker tags so their archive digests are distinct.
+          Only the attested archive is published here.
+
+          Assets:
+          - \`pygoat-attested.tar.gz\`: loadable Linux/amd64 Docker image archive.
+          - \`pygoat-attested.sigstore.json\`: signed SLSA provenance bundle.
+          - \`SHA256SUMS\`: archive checksum (not a substitute for attestation verification).
+
+          Verify with a current GitHub CLI before loading:
+
+          \`\`\`sh
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          gh attestation verify pygoat-attested.tar.gz --repo "$GITHUB_REPOSITORY" --bundle pygoat-attested.sigstore.json --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/container-attestation-release.yml" --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
+          docker load --input pygoat-attested.tar.gz
+          \`\`\`
+
+          The attestation covers the exact compressed archive bytes, not an OCI registry
+          manifest. Do not recompress the archive before verification. No registry push
+          is needed. The embedded image tag is \`pygoat:attested\`.
+
+          See [the walkthrough]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/container-attestation-release.md).
+          EOF
+          if [[ "$GITHUB_REF" == refs/heads/master ]]; then
+            # Pin the release to this run's commit, even if master has advanced.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Container attestation demo: $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --prerelease \
+            --latest=false \
+            release-assets/pygoat-attested.tar.gz \
+            release-assets/pygoat-attested.sigstore.json \
+            release-assets/SHA256SUMS
+          echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
+            >> "$GITHUB_STEP_SUMMARY"
