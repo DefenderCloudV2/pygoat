@@ -28,16 +28,22 @@ jobs:
       attestations: write
     outputs:
       artifact-id: ${{ steps.upload-attested.outputs.artifact-id }}
+      release-tag: ${{ steps.release-tag.outputs.tag }}
     steps:
-      - name: Require an attestation release tag
+      - name: Select release tag
+        id: release-tag
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF_TYPE" != tag || ! "$GITHUB_REF_NAME" =~ ^attestation-v[0-9][A-Za-z0-9._-]*$ ]]; then
-            echo "::error::Run this workflow on an attestation-v<version> tag, not a branch."
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/master ]]; then
+            echo "tag=attestation-v0.0.0-master-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^attestation-v[0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Run manually on master or use an attestation-v<version> tag."
             exit 1
           fi
 
-      - name: Check out tagged source
+      - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -86,6 +92,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/images/attested"
@@ -109,7 +116,8 @@ jobs:
             echo "## Container attestation"
             echo
             echo "Source commit: \`$GITHUB_SHA\`"
-            echo "Release tag: \`$GITHUB_REF_NAME\`"
+            echo "Source ref: \`$GITHUB_REF\`"
+            echo "Release tag: \`$RELEASE_TAG\`"
             echo
             echo "Both archives contain the same image layers, saved with different Docker tags."
             echo "Only the SHA-256 digest of \`pygoat-attested.tar.gz\` is attested."
@@ -163,6 +171,7 @@ jobs:
       - name: Publish learning prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-and-attest.outputs.release-tag }}
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
@@ -172,6 +181,7 @@ jobs:
           This prerelease demonstrates provenance and integrity, not security certification.
 
           Source commit: $GITHUB_SHA
+          Source ref: $GITHUB_REF
           Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
 
           The run contains both \`container-image-non-attested\` and
@@ -187,7 +197,7 @@ jobs:
           Verify with a current GitHub CLI before loading:
 
           \`\`\`sh
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
           gh attestation verify pygoat-attested.tar.gz --repo "$GITHUB_REPOSITORY" --bundle pygoat-attested.sigstore.json --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/container-attestation-release.yml" --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
           docker load --input pygoat-attested.tar.gz
           \`\`\`
@@ -198,15 +208,20 @@ jobs:
 
           See [the walkthrough]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/container-attestation-release.md).
           EOF
-          gh release create "$GITHUB_REF_NAME" \
+          if [[ "$GITHUB_REF" == refs/heads/master ]]; then
+            # Pin the release to this run's commit, even if master has advanced.
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+          fi
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "Container attestation demo: $GITHUB_REF_NAME" \
+            --title "Container attestation demo: $RELEASE_TAG" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --prerelease \
             --latest=false \
             release-assets/pygoat-attested.tar.gz \
             release-assets/pygoat-attested.sigstore.json \
             release-assets/SHA256SUMS
-          echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" \
+          echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" \
             >> "$GITHUB_STEP_SUMMARY"

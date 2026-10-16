@@ -54,9 +54,23 @@ A tag push runs the workflow from that tagged commit; it does not require
 merging the workflow into the default branch first. The repository's existing
 push workflows may also run, independently.
 
-Manual dispatch is also supported, but must target an `attestation-v<version>`
-tag, not a branch. GitHub's manual-dispatch UI requires the workflow to exist
-on the default branch. A tag push is the bootstrap path for this demo.
+After the workflow is merged into `master`, run it directly on `master`:
+
+```sh
+gh workflow run container-attestation-release.yml --repo DefenderCloudV2/pygoat --ref master
+gh run list --repo DefenderCloudV2/pygoat --workflow container-attestation-release.yml --branch master
+gh run watch RUN_ID --repo DefenderCloudV2/pygoat --exit-status
+```
+
+A manual `master` run creates a unique release tag
+`attestation-v0.0.0-master-RUN_ID-RUN_ATTEMPT` at the exact built commit, only
+after verification succeeds. Its provenance source ref is `refs/heads/master`,
+not the generated release tag. Tag creation uses `GITHUB_TOKEN`, so it does not
+trigger a second tag-push workflow run.
+
+Manual dispatch also accepts an existing `attestation-v<version>` tag; other
+branches are rejected. GitHub's manual-dispatch UI requires the workflow to
+exist on the default branch. A tag push is the bootstrap path for this demo.
 
 The build job needs `contents: read`, `id-token: write`, and
 `attestations: write`. The separate release job has `contents: write` and
@@ -78,9 +92,10 @@ repositories require an eligible enterprise plan.
    provenance, and only then publishes a prerelease with those same bytes.
 
 Verification restricts the repository, signer workflow, source commit, source
-tag, and GitHub-hosted runner. A checksum alone would not prove any of these.
+ref (tag or `master`), and GitHub-hosted runner. A checksum alone would not prove any of these.
 An existing release is never overwritten: rerunning publication for an already
-published tag fails. Use a fresh version tag for a new demonstration.
+published tag fails. Use a fresh version tag or a new manual `master` run for a
+new demonstration.
 
 ## Download, verify, and load
 
@@ -98,6 +113,9 @@ These single-line commands also work in PowerShell. Omit `--bundle` to look up
 the attestation using GitHub's API instead. Bundle verification can still need
 network access to refresh Sigstore trust material; it is not a guarantee of
 fully offline operation. Verify the compressed file unchanged, before loading.
+For a release from a manual `master` run, download its generated release tag
+and use `--source-ref refs/heads/master` with the source commit from that
+release's notes. Each release includes the exact verification command.
 
 To compare the unsigned example, download the baseline artifact from the same
 workflow run:
