@@ -87,7 +87,10 @@ before reporting success. Registry pushes are not atomic: if a run fails after
 one push, rerun it to finish publishing to both registries.
 
 Azure uses GitHub OIDC with the `pygoat-github-publisher` managed identity,
-trusted only for `repo:DefenderCloudV2/pygoat:ref:refs/heads/master`. It has
+trusted only for
+`repo:DefenderCloudV2@324759237/pygoat@1356696257:ref:refs/heads/master`.
+This repository enables immutable OIDC subjects, so the owner and repository
+IDs are required in the Azure federated credential, not just their names. It has
 `AcrPush` scoped to this registry, not the subscription. The Basic-tier registry
 and identity are in `rg-pygoat-containers` in East US. The registry incurs Azure
 charges; its admin account is disabled and pulls require authentication.
