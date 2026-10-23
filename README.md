@@ -71,6 +71,62 @@ First, Clone the repository using GitHub website or git in Terminal
 4. Browse to <http://127.0.0.1:8000> 
 5. Remove existing image using `docker image rm pygoat/pygoat` and pull again incase of any error
 
+### Publishing to ACR and GHCR
+
+The `Publish containers to ACR and GHCR` workflow
+(`.github/workflows/publish-containers.yml`) runs on pushes to `master` or
+manually on `master`. It builds the root Dockerfile once for Linux/amd64 and
+pushes the same image to both registries:
+
+- `pygoat22283822.azurecr.io/pygoat`
+- `ghcr.io/defendercloudv2/pygoat`
+
+Each image receives a full source-commit SHA tag and a moving `latest` tag.
+The workflow verifies both tags in both registries against the build digest
+before reporting success. Registry pushes are not atomic: if a run fails after
+one push, rerun it to finish publishing to both registries.
+
+Azure uses GitHub OIDC with the `pygoat-github-publisher` managed identity,
+trusted only for `repo:DefenderCloudV2/pygoat:ref:refs/heads/master`. It has
+`AcrPush` scoped to this registry, not the subscription. The Basic-tier registry
+and identity are in `rg-pygoat-containers` in East US. The registry incurs Azure
+charges; its admin account is disabled and pulls require authentication.
+GHCR publishing uses the workflow's `GITHUB_TOKEN` with `packages: write`;
+no Azure client secret or personal access token is stored.
+
+The repository has these Actions variables (identifiers, not secrets):
+
+| Variable | Value |
+| --- | --- |
+| `CONTAINER_AZURE_CLIENT_ID` | `a9e13f92-93bb-47af-b9e9-e9605052df84` |
+| `CONTAINER_AZURE_TENANT_ID` | `7070967c-b4ab-4835-84ac-9b51e0369f43` |
+| `CONTAINER_AZURE_SUBSCRIPTION_ID` | `22283822-a9ef-446d-927c-08399daccd79` |
+| `CONTAINER_ACR_NAME` | `pygoat22283822` |
+
+To run manually:
+
+```sh
+gh workflow run publish-containers.yml --repo DefenderCloudV2/pygoat --ref master
+gh run list --repo DefenderCloudV2/pygoat --workflow publish-containers.yml
+gh run watch RUN_ID --repo DefenderCloudV2/pygoat --exit-status
+```
+
+For an authenticated ACR pull:
+
+```sh
+az acr login --name pygoat22283822 --subscription 22283822-a9ef-446d-927c-08399daccd79
+docker pull pygoat22283822.azurecr.io/pygoat:latest
+```
+
+GHCR packages are private by default, even for a public source repository.
+Authorized users can authenticate to `ghcr.io` and pull the GHCR image;
+publishing does not change package visibility. Existing AKS deployment and
+archive-attestation workflows are unchanged. This workflow only publishes
+images; it does not deploy PyGoat.
+
+**PyGoat is intentionally vulnerable. Use these images only in an isolated
+learning environment, never in production.**
+
 ### From Docker-Compose 
 1. Install [Docker](https://www.docker.com)
 2. Run `docker-compose up` or `docker-compose up -d`
