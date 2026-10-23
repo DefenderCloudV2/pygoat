@@ -31,11 +31,12 @@ jobs:
       AZURE_TENANT_ID: ${{ vars.CONTAINER_AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.CONTAINER_AZURE_SUBSCRIPTION_ID }}
       ACR_NAME: ${{ vars.CONTAINER_ACR_NAME }}
+      ACR_RESOURCE_GROUP: ${{ vars.CONTAINER_ACR_RESOURCE_GROUP }}
     steps:
       - name: Validate configuration
         run: |
           set -euo pipefail
-          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME; do
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME ACR_RESOURCE_GROUP; do
             if [[ -z "${!name}" ]]; then
               echo "::error::Missing repository variable for $name; see README.md."
               exit 1
@@ -58,8 +59,8 @@ jobs:
         id: images
         run: |
           set -euo pipefail
-          login_server=$(az acr show --name "$ACR_NAME" --query loginServer --output tsv)
-          az acr login --name "$ACR_NAME"
+          login_server=$(az acr show --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP" --query loginServer --output tsv)
+          az acr login --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP"
           echo "acr=$login_server/pygoat" >> "$GITHUB_OUTPUT"
           echo "ghcr=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 

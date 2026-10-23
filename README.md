@@ -91,7 +91,9 @@ trusted only for
 `repo:DefenderCloudV2@324759237/pygoat@1356696257:ref:refs/heads/master`.
 This repository enables immutable OIDC subjects, so the owner and repository
 IDs are required in the Azure federated credential, not just their names. It has
-`AcrPush` scoped to this registry, not the subscription. The Basic-tier registry
+`AcrPush` and `Reader` scoped to this registry, not the subscription. `Reader`
+allows Azure CLI to resolve the registry's login server and configuration.
+The Basic-tier registry
 and identity are in `rg-pygoat-containers` in East US. The registry incurs Azure
 charges; its admin account is disabled and pulls require authentication.
 GHCR publishing uses the workflow's `GITHUB_TOKEN` with `packages: write`;
@@ -105,6 +107,7 @@ The repository has these Actions variables (identifiers, not secrets):
 | `CONTAINER_AZURE_TENANT_ID` | `7070967c-b4ab-4835-84ac-9b51e0369f43` |
 | `CONTAINER_AZURE_SUBSCRIPTION_ID` | `22283822-a9ef-446d-927c-08399daccd79` |
 | `CONTAINER_ACR_NAME` | `pygoat22283822` |
+| `CONTAINER_ACR_RESOURCE_GROUP` | `rg-pygoat-containers` |
 
 To run manually:
 
