@@ -226,7 +226,7 @@ To independently verify, sign in to ACR, substitute the digest reference from
 
 ```sh
 az acr login --name pygoat22283822 --subscription 22283822-a9ef-446d-927c-08399daccd79
-gh attestation verify oci://pygoat22283822.azurecr.io/pygoat-sbom@sha256:DIGEST --repo DefenderCloudV2/pygoat --bundle-from-oci --predicate-type https://spdx.dev/Document --signer-workflow DefenderCloudV2/pygoat/.github/workflows/publish-acr-sbom.yml --source-digest COMMIT_SHA --source-ref refs/heads/master --deny-self-hosted-runners
+gh attestation verify oci://pygoat22283822.azurecr.io/pygoat-sbom@sha256:DIGEST --repo DefenderCloudV2/pygoat --bundle-from-oci --predicate-type https://spdx.dev/Document/v2.3 --signer-workflow DefenderCloudV2/pygoat/.github/workflows/publish-acr-sbom.yml --source-digest COMMIT_SHA --source-ref refs/heads/master --deny-self-hosted-runners
 gh attestation verify oci://pygoat22283822.azurecr.io/pygoat-sbom@sha256:DIGEST --repo DefenderCloudV2/pygoat --bundle-from-oci --predicate-type https://slsa.dev/provenance/v1 --signer-workflow DefenderCloudV2/pygoat/.github/workflows/publish-acr-sbom.yml --source-digest COMMIT_SHA --source-ref refs/heads/master --deny-self-hosted-runners
 ```
 

@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           jq -e '
-            (.spdxVersion | startswith("SPDX-")) and
+            (.spdxVersion == "SPDX-2.3") and
             (.packages | length > 0) and
             any(.packages[].externalRefs[]?; .referenceLocator | startswith("pkg:pypi/")) and
             any(.packages[].externalRefs[]?; .referenceLocator | startswith("pkg:deb/"))
@@ -132,7 +132,7 @@ jobs:
             --bundle-from-oci --predicate-type https://slsa.dev/provenance/v1 \
             --format json > provenance-verification.json
           gh attestation verify "oci://$IMAGE@$DIGEST" "${policy[@]}" \
-            --bundle-from-oci --predicate-type https://spdx.dev/Document \
+            --bundle-from-oci --predicate-type https://spdx.dev/Document/v2.3 \
             --format json > sbom-verification.json
           jq -e --slurpfile sbom sbom.spdx.json \
             'any(.[]; .verificationResult.statement.predicate == $sbom[0])' \
