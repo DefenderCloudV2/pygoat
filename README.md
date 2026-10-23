@@ -180,6 +180,63 @@ both credentials remain on `pygoat-github-publisher` so the existing
 dual-registry workflow continues to work. See
 [how environments relate to deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#how-environments-relate-to-deployments).
 
+### Signed SBOM and image provenance in ACR
+
+`Publish image and signed SBOM to ACR` (`.github/workflows/publish-acr-sbom.yml`)
+is a separate, manual-only experiment on `master`. It uses the existing Azure
+variables and branch-scoped OIDC credential, with no GitHub environment or AKS
+deployment. It publishes `pygoat22283822.azurecr.io/pygoat-sbom` with a unique
+`COMMIT_SHA-RUN_ID-RUN_ATTEMPT` tag, leaving earlier experiments untouched.
+
+```sh
+gh workflow run publish-acr-sbom.yml --repo DefenderCloudV2/pygoat --ref master
+gh run list --repo DefenderCloudV2/pygoat --workflow publish-acr-sbom.yml
+```
+
+This implements the signed GitHub attestation strategy, not an unsigned ORAS
+attachment or BuildKit's embedded SBOM strategy:
+
+1. Build and push a Linux/amd64 image with repository and commit OCI labels.
+   BuildKit SBOM/provenance generation is disabled to keep the experiment distinct.
+2. Scan the exact published digest with pinned Syft, producing SPDX JSON for
+   detected OS and application packages, including installed transitive Python
+   dependencies. No SBOM tooling is installed into the application image.
+3. Use `actions/attest` twice to sign image build provenance and the image's
+   SBOM. Both attestations have the same image name/digest as their subject,
+   are uploaded to GitHub, and are pushed to ACR as registry attachments.
+   The SBOM JSON is the signed predicate, not a second container image.
+4. Fetch both attestations from ACR and verify their signatures, predicate
+   types, repository, workflow, source commit, and source ref. Compare the
+   verified SBOM predicate with the generated JSON.
+
+The run's downloadable artifact contains `sbom.spdx.json`, both Sigstore
+bundles, verification results, and `image.json` with the digest reference.
+Artifacts are retained for 30 days. Failed runs may contain only partial
+evidence, and image push plus attestation publication is not atomic: check
+the whole run's success, not just whether the image exists.
+
+The inventory is scanner-derived, not a guarantee that every component or
+direct/indirect relationship can be identified. The workflow checks that both
+Debian and Python package entries exist, but it does not claim a complete
+source dependency graph. It preserves the root Dockerfile's current build
+context, including the `.git` behavior described above.
+
+To independently verify, sign in to ACR, substitute the digest reference from
+`image.json` and its commit, and run with a current GitHub CLI:
+
+```sh
+az acr login --name pygoat22283822 --subscription 22283822-a9ef-446d-927c-08399daccd79
+gh attestation verify oci://pygoat22283822.azurecr.io/pygoat-sbom@sha256:DIGEST --repo DefenderCloudV2/pygoat --bundle-from-oci --predicate-type https://spdx.dev/Document --signer-workflow DefenderCloudV2/pygoat/.github/workflows/publish-acr-sbom.yml --source-digest COMMIT_SHA --source-ref refs/heads/master --deny-self-hosted-runners
+gh attestation verify oci://pygoat22283822.azurecr.io/pygoat-sbom@sha256:DIGEST --repo DefenderCloudV2/pygoat --bundle-from-oci --predicate-type https://slsa.dev/provenance/v1 --signer-workflow DefenderCloudV2/pygoat/.github/workflows/publish-acr-sbom.yml --source-digest COMMIT_SHA --source-ref refs/heads/master --deny-self-hosted-runners
+```
+
+The provenance step also requests a GitHub artifact **storage record**, using
+`artifact-metadata: write`, to associate the digest with its ACR location.
+This is distinct from both organization artifact deployment records and the
+repository deployment objects created by `environment:`. No artifact deployment
+record is submitted by this workflow. Signing an SBOM authenticates the
+workflow's statement, not its completeness or the application's security.
+
 ### From Docker-Compose 
 1. Install [Docker](https://www.docker.com)
 2. Run `docker-compose up` or `docker-compose up -d`

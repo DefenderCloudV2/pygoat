@@ -1,0 +1,165 @@
+name: Publish image and signed SBOM to ACR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      ACR_NAME: ${{ vars.CONTAINER_ACR_NAME }}
+      ACR_RESOURCE_GROUP: ${{ vars.CONTAINER_ACR_RESOURCE_GROUP }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Sign in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.CONTAINER_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.CONTAINER_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.CONTAINER_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign in to ACR and select image
+        id: image
+        run: |
+          set -euo pipefail
+          login_server=$(az acr show --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP" --query loginServer --output tsv)
+          az acr login --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP"
+          echo "name=$login_server/pygoat-sbom" >> "$GITHUB_OUTPUT"
+          echo "tag=$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/sbom-evidence"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          # Isolate signed GitHub attestations from BuildKit's unsigned ones.
+          provenance: false
+          sbom: false
+
+      - name: Generate SPDX SBOM from the published image digest
+        id: sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: registry:${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          syft-version: v1.55.0
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom-evidence/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Check SBOM package coverage
+        run: |
+          set -euo pipefail
+          jq -e '
+            (.spdxVersion | startswith("SPDX-")) and
+            (.packages | length > 0) and
+            any(.packages[].externalRefs[]?; .referenceLocator | startswith("pkg:pypi/")) and
+            any(.packages[].externalRefs[]?; .referenceLocator | startswith("pkg:deb/"))
+          ' "$RUNNER_TEMP/sbom-evidence/sbom.spdx.json"
+
+      - name: Sign image build provenance and publish to ACR
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-version: ${{ steps.image.outputs.tag }}
+          push-to-registry: true
+          create-storage-record: true
+
+      - name: Sign image SBOM and publish to ACR
+        id: attest-sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom-evidence/sbom.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify both signed attestations from ACR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.attest-sbom.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/sbom-evidence"
+          cp "$PROVENANCE_BUNDLE" provenance.sigstore.json
+          cp "$SBOM_BUNDLE" sbom.sigstore.json
+          actual=$(docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+          test "$actual" = "$DIGEST"
+          policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-acr-sbom.yml"
+            --source-digest "$GITHUB_SHA"
+            --source-ref "$GITHUB_REF"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify "oci://$IMAGE@$DIGEST" "${policy[@]}" \
+            --bundle-from-oci --predicate-type https://slsa.dev/provenance/v1 \
+            --format json > provenance-verification.json
+          gh attestation verify "oci://$IMAGE@$DIGEST" "${policy[@]}" \
+            --bundle-from-oci --predicate-type https://spdx.dev/Document \
+            --format json > sbom-verification.json
+          jq -e --slurpfile sbom sbom.spdx.json \
+            'any(.[]; .verificationResult.statement.predicate == $sbom[0])' \
+            sbom-verification.json
+          jq -n --arg image "$IMAGE@$DIGEST" --arg tag "$IMAGE_TAG" \
+            --arg commit "$GITHUB_SHA" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{image: $image, tag: $tag, commit: $commit, run: $run}' > image.json
+          {
+            echo "## Signed SBOM experiment"
+            echo
+            echo "Image: \`$IMAGE@$DIGEST\`"
+            echo "Tag: \`$IMAGE_TAG\`"
+            echo "Commit: \`$GITHUB_SHA\`"
+            echo "SBOM packages: $(jq '.packages | length' sbom.spdx.json)"
+            echo
+            echo "Verified signed SPDX SBOM and SLSA provenance fetched from ACR."
+            echo "The verified SBOM predicate matches the downloadable SBOM."
+            echo "A GitHub artifact storage record was requested; no deployment was performed."
+            echo "PyGoat is intentionally vulnerable; attestations do not certify it as safe."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SBOM and verification evidence
+        if: ${{ always() && steps.sbom.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acr-signed-sbom-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sbom-evidence/
+          if-no-files-found: error
+          retention-days: 30
