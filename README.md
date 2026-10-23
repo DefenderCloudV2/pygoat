@@ -87,7 +87,7 @@ before reporting success. Registry pushes are not atomic: if a run fails after
 one push, rerun it to finish publishing to both registries.
 
 Azure uses GitHub OIDC with the `pygoat-github-publisher` managed identity,
-trusted only for
+with a branch trust for
 `repo:DefenderCloudV2@324759237/pygoat@1356696257:ref:refs/heads/master`.
 This repository enables immutable OIDC subjects, so the owner and repository
 IDs are required in the Azure federated credential, not just their names. It has
@@ -163,8 +163,22 @@ simple build actually produces. Distinguish these sources of information:
 The existing AKS workflow creates GitHub deployment records because its job
 declares `environment: aks-test`. GitHub Actions creates the deployment and
 updates its status automatically; neither `docker push` nor ACR creates it.
-The simple publishing job has no `environment` and makes no deployment API
-calls. See [how environments relate to deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#how-environments-relate-to-deployments).
+The [baseline simple publishing run](https://github.com/DefenderCloudV2/pygoat/actions/runs/39905883783)
+had no `environment` and produced no deployment record.
+
+The simple publishing job now declares `environment: acr-push-test` to test
+that behavior without AKS. It has separate build and Docker push steps, but
+still makes no deployment API calls and deploys no application. GitHub creates
+the deployment record for the environment-bound job and updates its status as
+the job progresses, independently of the image metadata.
+
+The `acr-push-test` environment allows only the `master` branch. Its Azure
+federated credential uses the subject
+`repo:DefenderCloudV2@324759237/pygoat@1356696257:environment:acr-push-test`.
+An environment-bound job uses this subject instead of the branch subject;
+both credentials remain on `pygoat-github-publisher` so the existing
+dual-registry workflow continues to work. See
+[how environments relate to deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#how-environments-relate-to-deployments).
 
 ### From Docker-Compose 
 1. Install [Docker](https://www.docker.com)
