@@ -1,0 +1,60 @@
+name: Publish simple image to ACR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ACR_NAME: ${{ vars.CONTAINER_ACR_NAME }}
+  ACR_RESOURCE_GROUP: ${{ vars.CONTAINER_ACR_RESOURCE_GROUP }}
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Sign in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.CONTAINER_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.CONTAINER_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.CONTAINER_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push image
+        shell: bash
+        run: |
+          set -euo pipefail
+          login_server=$(az acr show --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP" --query loginServer --output tsv)
+          az acr login --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP"
+          image="$login_server/pygoat-simple:$GITHUB_SHA"
+          docker build --tag "$image" .
+          docker push "$image"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Inspect image metadata without starting the application
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Image configuration labels:"
+          docker image inspect "$IMAGE" --format '{{json .Config.Labels}}'
+          echo "Registry manifest:"
+          docker buildx imagetools inspect "$IMAGE" --raw
+          echo
+          echo "Git metadata copied into the image filesystem:"
+          docker run --rm --network none --entrypoint sh "$IMAGE" -c '
+            set -eu
+            if [ -d /app/.git ]; then
+              git -c safe.directory=/app -C /app rev-parse HEAD
+              git -c safe.directory=/app -C /app config --get remote.origin.url
+            else
+              echo "No /app/.git directory"
+            fi
+          '

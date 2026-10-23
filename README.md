@@ -133,6 +133,39 @@ images; it does not deploy PyGoat.
 **PyGoat is intentionally vulnerable. Use these images only in an isolated
 learning environment, never in production.**
 
+### Simple ACR-only metadata experiment
+
+`Publish simple image to ACR` (`.github/workflows/publish-acr-simple.yml`) is
+manual-only on `master` and reuses the Azure variables above. Like the AKS
+workflow, it runs plain `docker build --tag ... .` followed by `docker push`.
+It publishes only `pygoat22283822.azurecr.io/pygoat-simple:FULL_COMMIT_SHA`,
+keeping the dual-registry image untouched. It adds no explicit image labels,
+build arguments, attestations, or provenance flags, and does not use
+`docker/build-push-action` or deploy an application.
+
+```sh
+gh workflow run publish-acr-simple.yml --repo DefenderCloudV2/pygoat --ref master
+```
+
+The final step prints image configuration labels, the registry manifest, and
+any Git commit and origin URL found in `/app/.git`, without starting PyGoat.
+It leaves Docker's default build behavior intact so the logs show what this
+simple build actually produces. Distinguish these sources of information:
+
+- A SHA in an image **tag** is explicitly chosen by the workflow, not a label.
+- Image **labels** can come from build options, the Dockerfile, or a base image.
+- Build **provenance** is separate from labels; its retention depends on the
+  builder, image store, and export path.
+- Files inside the image can contain repository information even without labels.
+  The root Dockerfile uses `COPY . /app/`, and there is no root `.dockerignore`
+  excluding `.git`. This experiment preserves that behavior.
+
+The existing AKS workflow creates GitHub deployment records because its job
+declares `environment: aks-test`. GitHub Actions creates the deployment and
+updates its status automatically; neither `docker push` nor ACR creates it.
+The simple publishing job has no `environment` and makes no deployment API
+calls. See [how environments relate to deployments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#how-environments-relate-to-deployments).
+
 ### From Docker-Compose 
 1. Install [Docker](https://www.docker.com)
 2. Run `docker-compose up` or `docker-compose up -d`
