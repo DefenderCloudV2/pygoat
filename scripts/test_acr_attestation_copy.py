@@ -1,7 +1,10 @@
 import copy
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
-from acr_attestation_copy import validate_copies, validate_predicates
+from acr_attestation_copy import save_sbom, validate_copies, validate_predicates
 
 
 class EvidenceTests(unittest.TestCase):
@@ -66,6 +69,22 @@ class EvidenceTests(unittest.TestCase):
         statements[1]["predicate"]["packages"] = []
         with self.assertRaises(ValueError):
             validate_predicates(statements, "sha256:platform")
+
+    def test_compaction_preserves_full_sbom(self):
+        sbom = self.statements()[1]["predicate"]
+        sbom["documentNamespace"] = "https://example.com/\u00e9"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sbom.json"
+            save_sbom(path, sbom)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), sbom)
+            self.assertLess(path.stat().st_size, len(json.dumps(sbom, indent=2)))
+
+    def test_rejects_oversized_sbom_without_truncation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sbom.json"
+            with self.assertRaisesRegex(ValueError, "16 MiB"):
+                save_sbom(path, {"data": "x" * (16 * 1024 * 1024)})
+            self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

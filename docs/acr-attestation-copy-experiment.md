@@ -22,7 +22,10 @@ gh run watch RUN_ID --repo DefenderCloudV2/pygoat --exit-status
    signed by those flags alone.
 2. Download the actual index, attestation manifests, and in-toto blobs. Require
    SLSA provenance and an SPDX 2.3 SBOM with packages, both referring to the
-   Linux/amd64 platform digest. Extract the SBOM predicate for signing.
+   Linux/amd64 platform digest. Extract the SBOM predicate for signing, using
+   compact JSON to avoid expanding it past GitHub's 16 MiB signing limit.
+   No packages, files, or relationships are removed; an oversized compact
+   document fails explicitly rather than silently truncating the inventory.
 3. Use `actions/attest-build-provenance` with `push-to-registry: true` to attach
    signed provenance to the root index digest. Use `actions/attest` to attach
    the extracted SBOM as a second signed attestation of that same index.

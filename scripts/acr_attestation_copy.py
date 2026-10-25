@@ -16,6 +16,13 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def save_sbom(path, sbom):
+    # Whitespace alone can push BuildKit's full file inventory over the signing limit.
+    payload = json.dumps(sbom, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    require(len(payload) <= 16 * 1024 * 1024, "Complete SBOM exceeds GitHub's 16 MiB signing limit")
+    path.write_bytes(payload)
+
+
 def fetch_json(command, path, digest=None):
     result = subprocess.run(command, check=True, stdout=subprocess.PIPE)
     if digest is not None:
@@ -85,7 +92,7 @@ def inspect(image, output):
             )
             statements.append(statement)
     sbom = validate_predicates(statements, platform_digest)
-    save(output / "sbom.spdx.json", sbom)
+    save_sbom(output / "sbom.spdx.json", sbom)
     fetch_json(
         ["crane", "config", f"{repository}@{platform_digest}"],
         output / "image-config.json",
