@@ -34,8 +34,10 @@ jobs:
         with:
           python-version: "3.9"
           cache: pip
-      - name: Test runner image SBOM action
-        run: bash .github/actions/runner-image-sbom/test.sh
+      - name: Test image SBOM actions
+        run: |
+          bash .github/actions/runner-image-sbom/test.sh
+          bash .github/actions/runner-registry-image-sbom/test.sh
       - run: pip install "setuptools<61" wheel
       - run: pip install --no-build-isolation --use-deprecated=legacy-resolver -r requirements.txt
       - run: python -m compileall -q pygoat

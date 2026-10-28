@@ -1,0 +1,155 @@
+name: Runner and registry image SBOMs
+description: Scan all local Docker images and explicit published digest references with Syft, without pulling registry images into Docker.
+
+inputs:
+  registry-images:
+    description: Optional newline-separated registry/repository@sha256:digest references from build outputs.
+    required: false
+    default: ""
+  registry-platform:
+    description: Platform to scan for registry references; invoke separately for each platform of a multi-platform build.
+    default: linux/amd64
+  artifact-name:
+    description: Optional unique artifact name; set this for matrix jobs.
+    required: false
+  retention-days:
+    description: How many days to retain the GitHub artifact.
+    default: "30"
+
+outputs:
+  artifact-directory:
+    description: Directory containing SPDX JSON SBOMs and the build/image index.
+    value: ${{ steps.scan.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Syft
+      id: syft
+      if: ${{ !cancelled() }}
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      with:
+        syft-version: v1.55.0
+
+    - name: Scan local and published images
+      id: scan
+      if: ${{ !cancelled() && steps.syft.outcome == 'success' }}
+      shell: bash
+      env:
+        SYFT_COMMAND: ${{ steps.syft.outputs.cmd }}
+        REGISTRY_IMAGES: ${{ inputs.registry-images }}
+        REGISTRY_PLATFORM: ${{ inputs.registry-platform }}
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        state=$(mktemp -d "$RUNNER_TEMP/runner-registry-image-sbom.XXXXXX")
+        docker image ls --all --quiet --no-trunc | sort -u > "$state/local.txt"
+        if grep -qvE '^sha256:[0-9a-f]{64}$' "$state/local.txt"; then
+          echo "::error::Docker returned an invalid image ID."
+          exit 1
+        fi
+        printf '%s\n' "$REGISTRY_IMAGES" | sed -e 's/\r$//' \
+          -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' |
+          sort -u > "$state/registry.txt"
+        if grep -qvE '^[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$' "$state/registry.txt"; then
+          echo "::error::registry-images must contain registry/repository@sha256:digest references, one per line (no tags or URL schemes)."
+          exit 1
+        fi
+        if [[ ! "$REGISTRY_PLATFORM" =~ ^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9_.-]+)?$ ]]; then
+          echo "::error::registry-platform must be os/architecture or os/architecture/variant."
+          exit 1
+        fi
+        sed 's/^/docker:/' "$state/local.txt" > "$state/sources.txt"
+        sed 's/^/registry:/' "$state/registry.txt" >> "$state/sources.txt"
+        destination="$state/sboms"
+        mkdir "$destination"
+        echo "artifact-directory=$destination" >> "$GITHUB_OUTPUT"
+        records="$state/images.jsonl"
+        metadata="$state/image.json"
+        syft_json="$state/syft.json"
+        : > "$records"
+        failed=0
+        while IFS= read -r source; do
+          kind="${source%%:*}"
+          reference="${source#*:}"
+          platform_args=()
+          platform=""
+          if [[ "$kind" == registry ]]; then
+            platform="$REGISTRY_PLATFORM"
+            platform_args=(--platform "$platform")
+            key=$(printf '%s\n%s' "$reference" "$platform" | sha256sum | cut -d ' ' -f 1)
+            filename="registry-sha256-$key.spdx.json"
+          else
+            filename="${reference/:/-}.spdx.json"
+          fi
+          sbom="$destination/$filename"
+          jq -n --arg kind "$kind" --arg reference "$reference" --arg platform "$platform" '
+            {source: {type: $kind, reference: $reference,
+              requested_platform: (if $platform == "" then null else $platform end)}}' > "$metadata"
+          echo "Generating SBOM for $source"
+          if timeout 600 "$SYFT_COMMAND" scan "$source" "${platform_args[@]}" \
+              --output "spdx-json=$sbom" --output "syft-json=$syft_json" &&
+            jq -se 'length == 1 and (.[0] | type == "object" and
+              .spdxVersion == "SPDX-2.3" and (.packages | type == "array"))' "$sbom" > /dev/null &&
+            jq -sce --slurpfile base "$metadata" '
+              select(length == 1) | .[0].source | select(.type == "image") | .metadata |
+              select(.imageID | type == "string" and test("^sha256:[0-9a-f]{64}$")) |
+              . as $image | (.config | @base64d | fromjson) as $config |
+              $base[0] + {
+                image_id: $image.imageID, tags: ($image.tags // []),
+                repo_digests: (($image.repoDigests // []) +
+                  (if $base[0].source.type == "registry" then [$base[0].source.reference] else [] end) | unique),
+                manifest_digest: $image.manifestDigest,
+                platform: {os: $image.os, architecture: $image.architecture, variant: $image.architectureVariant},
+                image_created_at: $config.created,
+                oci_labels: (($image.labels // {}) | with_entries(select(
+                  .key == "org.opencontainers.image.source" or
+                  .key == "org.opencontainers.image.revision" or
+                  .key == "org.opencontainers.image.version")))
+              }' "$syft_json" > "$state/enriched.json"; then
+            digest=$(sha256sum "$sbom" | cut -d ' ' -f 1)
+            jq -c --arg sbom "$filename" --arg digest "$digest" \
+              --argjson size "$(wc -c < "$sbom")" --argjson packages "$(jq '.packages | length' "$sbom")" '
+              . + {status: "success", sbom: $sbom, sbom_sha256: $digest,
+                sbom_size_bytes: $size, packages: $packages}' "$state/enriched.json" >> "$records"
+          else
+            echo "::error::SBOM generation failed for $source."
+            rm -f -- "$sbom"
+            jq -c '. + {status: "failed", error: "Syft failed, timed out, or returned invalid SBOM/image metadata."}' \
+              "$metadata" >> "$records"
+            failed=1
+          fi
+          rm -f -- "$syft_json"
+        done < "$state/sources.txt"
+        jq -n --slurpfile images "$records" --arg scan_id "${state##*/}" \
+          --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+          (["repository", "repository_id", "repository_owner_id", "sha", "ref", "workflow",
+            "workflow_ref", "workflow_sha", "run_id", "run_attempt", "job", "event_name", "server_url"] |
+            map(. as $key | {key: $key, value: env["GITHUB_" + ($key | ascii_upcase)]}) |
+            from_entries) as $build |
+          {schema_version: 1, scan_id: $scan_id, generated_at: $generated_at,
+            build: ($build + {runner: {os: env.RUNNER_OS, arch: env.RUNNER_ARCH},
+              run_url: (if $build.server_url and $build.repository and $build.run_id then
+                "\($build.server_url)/\($build.repository)/actions/runs/\($build.run_id)" else null end)}),
+            images: $images}' > "$destination/index.json"
+        count=$(jq '.images | length' "$destination/index.json")
+        succeeded=$(jq '[.images[] | select(.status == "success")] | length' "$destination/index.json")
+        {
+          echo "## Runner and registry image SBOMs"
+          echo
+          echo "Found $(wc -l < "$state/local.txt") local image IDs and $(wc -l < "$state/registry.txt") registry references; generated $succeeded SPDX SBOMs."
+          echo 'The index identifies the source, requested platform, image metadata, and checksums for each scan.'
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [[ "$count" == 0 ]]; then
+          echo "::notice::No local images or registry references found; index.json contains no images."
+        fi
+        exit "$failed"
+
+    - name: Upload SBOMs and image index to GitHub
+      if: ${{ always() && steps.scan.outputs.artifact-directory != '' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.artifact-name || format('runner-registry-image-sboms-{0}-{1}-{2}', github.job, github.run_id, github.run_attempt) }}
+        path: ${{ steps.scan.outputs.artifact-directory }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error

@@ -187,6 +187,15 @@ need to be copied into the consuming repository. Optional `artifact-name` and
 See the [reusable action guide](.github/actions/runner-image-sbom/README.md)
 for a complete cross-repository example and artifact download APIs.
 
+A separate [local-plus-registry action](.github/actions/runner-registry-image-sbom/README.md)
+is available at `.github/actions/runner-registry-image-sbom`. It scans every local
+image plus explicit published digest references using Syft's `registry:` source,
+without pulling those references into Docker. `publish-containers.yml` runs it
+before the existing pull and original scanner, producing separate
+`runner-registry-image-sboms-...` and `runner-image-sboms-...` artifacts for comparison.
+The registry platform defaults to `linux/amd64`; multi-platform consumers must
+invoke it separately for each platform. Private registry login is required.
+
 SBOMs are uploaded **only as GitHub artifacts**. No Azure Storage upload or
 Entra/OIDC configuration is required by this action. The index retains build,
 image, and checksum metadata so a GitHub App with **Actions: read** permission

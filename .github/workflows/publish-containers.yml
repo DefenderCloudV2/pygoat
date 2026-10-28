@@ -92,13 +92,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Generate comparison SBOMs from local images and the registry
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: ./.github/actions/runner-registry-image-sbom
+        with:
+          registry-images: ${{ steps.images.outputs.acr }}@${{ steps.build.outputs.digest }}
+          registry-platform: linux/amd64
+
       - name: Load published image into the runner for SBOM generation
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           IMAGE: ${{ steps.images.outputs.acr }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: docker pull "$IMAGE@$DIGEST"
 
       - name: Verify published digests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           ACR_IMAGE: ${{ steps.images.outputs.acr }}
           GHCR_IMAGE: ${{ steps.images.outputs.ghcr }}
