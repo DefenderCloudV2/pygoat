@@ -29,6 +29,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Snapshot runner images
+        id: runner-images
+        uses: ./.github/actions/runner-image-sbom
+        with:
+          phase: snapshot
+
       - name: Test evidence checks
         run: |
           set -euo pipefail
@@ -95,6 +101,12 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Load published image into the runner for SBOM generation
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: docker pull "$IMAGE@$DIGEST"
 
       - name: Inspect BuildKit metadata before signing
         env:
@@ -181,3 +193,13 @@ jobs:
           path: ${{ env.EVIDENCE }}/
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Generate SBOMs for new runner images
+        if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+        uses: ./.github/actions/runner-image-sbom
+        with:
+          phase: scan
+          state-directory: ${{ steps.runner-images.outputs.state-directory }}
+          upload-service-url: ${{ vars.SBOM_UPLOAD_SERVICE_URL }}
+          oidc-audience: ${{ vars.SBOM_UPLOAD_OIDC_AUDIENCE }}
+          storage-account: ${{ vars.SBOM_STORAGE_ACCOUNT }}

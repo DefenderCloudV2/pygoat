@@ -14,7 +14,7 @@ Configure all three repository/environment Actions variables:
 | `SBOM_UPLOAD_OIDC_AUDIENCE` | `oidc-audience` | Exact audience the broker accepts, for example `api://sbom-uploads`. |
 | `SBOM_STORAGE_ACCOUNT` | `storage-account` | Azure public-cloud account name whose blob host the client permits. |
 
-The calling job needs `permissions: {contents: read, id-token: write}`. All five
+The calling job needs `permissions: {contents: read, id-token: write}`. All six
 integrated image-building jobs already have these permissions. No account key,
 pre-generated SAS, or client secret is configured in GitHub.
 

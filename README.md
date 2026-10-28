@@ -135,7 +135,7 @@ learning environment, never in production.**
 
 ### Reusable post-build SBOM action
 
-All five image-building workflows use `.github/actions/runner-image-sbom`.
+All six image-building workflows use `.github/actions/runner-image-sbom`.
 It runs on the **same runner and Docker daemon as the build**, not in a separate
 workflow or job. Add a snapshot after checkout and a scan as the last step:
 
@@ -174,7 +174,7 @@ images and completed results are uploaded. No new images produces an explicit
 notice and an empty index. The final step also runs after earlier failures,
 provided the snapshot succeeded; cancellation or runner loss can prevent it.
 
-Plain `docker build` outputs are scanned directly. The two push-only Buildx
+Plain `docker build` outputs are scanned directly. The three push-only Buildx
 workflows pull their published image **by immutable digest** into the local
 daemon before scanning, preserving their existing build/export and attestation
 settings. They do not rely on a moving tag. A push-only or cache-only build is
@@ -200,7 +200,7 @@ job, image IDs/tags/registry digests/platform, and SBOM checksums and sizes.
 
 Configure `SBOM_UPLOAD_SERVICE_URL`, `SBOM_UPLOAD_OIDC_AUDIENCE`, and
 `SBOM_STORAGE_ACCOUNT` to enable it. The calling job requires `id-token: write`
-(already present in the five integrated workflows). With no configuration,
+(already present in the six integrated workflows). With no configuration,
 Azure upload is explicitly skipped with a warning; GitHub artifacts remain
 available. Once configured, upload failures fail the job, and sanitized
 `upload-results.json` is retained with the GitHub artifact. Tokens and SAS query
