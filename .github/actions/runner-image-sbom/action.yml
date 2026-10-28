@@ -1,13 +1,7 @@
 name: Runner image SBOMs
-description: Generate Syft SBOMs for new local Docker images and upload them as GitHub artifacts.
+description: Generate Syft SBOMs for all local Docker images and upload them as GitHub artifacts.
 
 inputs:
-  phase:
-    description: snapshot before building, or scan as the final step in the same job.
-    required: true
-  state-directory:
-    description: The state-directory output from the snapshot step (required for scan).
-    required: false
   artifact-name:
     description: Optional unique artifact name; set this for matrix jobs.
     required: false
@@ -16,9 +10,6 @@ inputs:
     default: "30"
 
 outputs:
-  state-directory:
-    description: Pass this directory from the snapshot step to the scan step.
-    value: ${{ steps.snapshot.outputs.state-directory }}
   artifact-directory:
     description: Directory containing SPDX JSON SBOMs and the build/image index.
     value: ${{ steps.scan.outputs.artifact-directory }}
@@ -26,69 +17,33 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Validate inputs
-      id: validate
-      if: ${{ !cancelled() }}
-      shell: bash
-      env:
-        PHASE: ${{ inputs.phase }}
-        STATE_DIRECTORY: ${{ inputs.state-directory }}
-      run: |
-        set -euo pipefail
-        case "$PHASE" in
-          snapshot) ;;
-          scan)
-            if [[ -z "$STATE_DIRECTORY" || ! -r "$STATE_DIRECTORY/before.txt" ]]; then
-              echo "::error::scan requires a readable snapshot."
-              exit 1
-            fi ;;
-          *) echo "::error::phase must be snapshot or scan."; exit 1 ;;
-        esac
-
-    - name: Snapshot Docker image IDs
-      id: snapshot
-      if: ${{ !cancelled() && inputs.phase == 'snapshot' && steps.validate.outcome == 'success' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        export LC_ALL=C
-        state=$(mktemp -d "$RUNNER_TEMP/runner-image-sbom.XXXXXX")
-        docker image ls --all --quiet --no-trunc | sort -u > "$state/before.txt"
-        if grep -qvE '^sha256:[0-9a-f]{64}$' "$state/before.txt"; then
-          echo "::error::Docker returned an invalid image ID."
-          exit 1
-        fi
-        echo "state-directory=$state" >> "$GITHUB_OUTPUT"
-
     - name: Install pinned Syft
       id: syft
-      if: ${{ !cancelled() && inputs.phase == 'scan' && steps.validate.outcome == 'success' }}
+      if: ${{ !cancelled() }}
       uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       with:
         syft-version: v1.55.0
 
-    - name: Scan new local images
+    - name: Scan all local images
       id: scan
-      if: ${{ !cancelled() && inputs.phase == 'scan' && steps.syft.outcome == 'success' }}
+      if: ${{ !cancelled() && steps.syft.outcome == 'success' }}
       shell: bash
       env:
-        STATE_DIRECTORY: ${{ inputs.state-directory }}
         SYFT_COMMAND: ${{ steps.syft.outputs.cmd }}
       run: |
         set -euo pipefail
         export LC_ALL=C
-        sort -cu "$STATE_DIRECTORY/before.txt"
-        docker image ls --all --quiet --no-trunc | sort -u > "$STATE_DIRECTORY/after.txt"
-        if grep -qvE '^sha256:[0-9a-f]{64}$' "$STATE_DIRECTORY/before.txt" "$STATE_DIRECTORY/after.txt"; then
-          echo "::error::Invalid Docker image ID in the snapshot or current inventory."
+        state=$(mktemp -d "$RUNNER_TEMP/runner-image-sbom.XXXXXX")
+        docker image ls --all --quiet --no-trunc | sort -u > "$state/images.txt"
+        if grep -qvE '^sha256:[0-9a-f]{64}$' "$state/images.txt"; then
+          echo "::error::Docker returned an invalid image ID."
           exit 1
         fi
-        comm -13 "$STATE_DIRECTORY/before.txt" "$STATE_DIRECTORY/after.txt" > "$STATE_DIRECTORY/new.txt"
-        destination="$STATE_DIRECTORY/sboms"
+        destination="$state/sboms"
         mkdir "$destination"
         echo "artifact-directory=$destination" >> "$GITHUB_OUTPUT"
-        records="$STATE_DIRECTORY/images.jsonl"
-        metadata="$STATE_DIRECTORY/image.json"
+        records="$state/images.jsonl"
+        metadata="$state/image.json"
         : > "$records"
         failed=0
         while IFS= read -r image; do
@@ -124,8 +79,8 @@ runs:
           rm -f -- "$sbom"
           jq -c --arg error "$error" '. + {status: "failed", error: $error}' "$metadata" >> "$records"
           failed=1
-        done < "$STATE_DIRECTORY/new.txt"
-        jq -n --slurpfile images "$records" --arg scan_id "${STATE_DIRECTORY##*/}" \
+        done < "$state/images.txt"
+        jq -n --slurpfile images "$records" --arg scan_id "${state##*/}" \
           --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
           (["repository", "repository_id", "repository_owner_id", "sha", "ref", "workflow",
             "workflow_ref", "workflow_sha", "run_id", "run_attempt", "job", "event_name", "server_url"] |
@@ -141,16 +96,16 @@ runs:
         {
           echo "## Runner image SBOMs"
           echo
-          echo "Found $count new local image IDs; generated $succeeded SPDX SBOMs."
+          echo "Found $count local image IDs; generated $succeeded SPDX SBOMs."
           echo 'The artifact includes SBOMs and an index.json with build/image metadata and checksums.'
         } >> "$GITHUB_STEP_SUMMARY"
         if [[ "$count" == 0 ]]; then
-          echo "::notice::No new local Docker image IDs since the snapshot; index.json is empty."
+          echo "::notice::No local Docker images found; index.json contains no images."
         fi
         exit "$failed"
 
     - name: Upload SBOMs and image index to GitHub
-      if: ${{ always() && inputs.phase == 'scan' && steps.scan.outputs.artifact-directory != '' }}
+      if: ${{ always() && steps.scan.outputs.artifact-directory != '' }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ${{ inputs.artifact-name || format('runner-image-sboms-{0}-{1}-{2}', github.job, github.run_id, github.run_attempt) }}

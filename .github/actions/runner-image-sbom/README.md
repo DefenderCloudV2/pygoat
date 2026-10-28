@@ -4,9 +4,10 @@ A reusable composite action using **Bash, Docker, jq, and Syft**. All runtime
 commands live in `action.yml`; no Python scripts, Azure credentials, OIDC
 configuration, or copied helper files are needed.
 
-It snapshots the job's Docker images before building, then scans newly available
-image IDs and uploads SPDX JSON SBOMs plus build/image metadata to GitHub Actions.
-Both invocations must run in the **same job**, against the same Docker daemon.
+It scans **every image ID currently available in the job's Docker image store**
+and uploads SPDX JSON SBOMs plus build/image metadata to GitHub Actions. Run it
+once after building, in the **same job**, against the same Docker daemon.
+No snapshot or state-directory input is needed.
 
 ## Use from another repository
 
@@ -26,24 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Snapshot runner images
-        id: runner-images
-        uses: DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master
-        with:
-          phase: snapshot
-
       - name: Build
         run: docker build --tag example:ci .
 
       - name: Upload image SBOMs
-        if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         uses: DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master
-        with:
-          phase: scan
-          state-directory: ${{ steps.runner-images.outputs.state-directory }}
 ```
 
-The example tracks `master`; pin **both** references to the same reviewed full
+The example tracks `master`; pin the action reference to a reviewed full
 commit SHA for production. The consuming job's repository, commit, and run
 populate the metadata, not this action's repository. There is no need to check
 out this action's source separately. Within this repository, use
@@ -57,18 +49,19 @@ repositories. No additional artifact-upload permission or Entra setup is needed.
 
 | Input | Meaning |
 | --- | --- |
-| `phase` | Required: `snapshot` before building or `scan` afterward. |
-| `state-directory` | Required for `scan`: the snapshot step's output of the same name. |
 | `artifact-name` | Optional override; default `runner-image-sboms-JOB-RUN_ID-RUN_ATTEMPT`. Give each matrix job or repeated scan a unique name. |
 | `retention-days` | Optional GitHub artifact retention; defaults to `30`, subject to repository limits. |
 
-The snapshot exposes `state-directory`; the scan exposes `artifact-directory`.
-Snapshot state is temporary internal data, not an interchange format. A
-`scan_id` is an opaque identifier derived from the unique snapshot directory.
+The action exposes `artifact-directory`. It creates its own temporary working
+directory; `scan_id` is an opaque identifier derived from that unique directory.
+
+**Migrating from the two-step version:** remove the snapshot step, the `phase`
+and `state-directory` inputs, and the condition referencing `steps.runner-images`.
+Use the single final step above instead.
 
 ## Artifact contents
 
-- `sha256-<image-id>.spdx.json`: one Syft SPDX 2.3 SBOM per new local image ID.
+- `sha256-<image-id>.spdx.json`: one Syft SPDX 2.3 SBOM per unique local image ID.
 - `index.json`: scan ID/time; repository and workflow identity; commit/ref;
   run ID/attempt/URL; job and runner OS/architecture; image IDs, tags, registry
   digests, platform and creation time; selected OCI labels; package counts;
@@ -92,15 +85,17 @@ download redirect. Retrieve artifacts before their retention period expires.
 
 ## Behavior and requirements
 
-Use a Linux runner with Docker, Bash, jq, and GNU coreutils (`sort`, `comm`,
+Use a Linux runner with Docker, Bash, jq, and GNU coreutils (`sort`,
 `sha256sum`, `timeout`, etc.); GitHub-hosted Ubuntu runners include these tools.
 The action installs pinned Syft. It does not run the application container.
 
 Docker IDs are deduplicated, so multiple tags for the same image share an SBOM.
-The scan includes untagged images and newly pulled images, not only build
-outputs. Pre-existing IDs, images removed before scanning, and BuildKit-only
-cache stages are excluded. An empty scan records an empty image array and a
-notice, not an error. Snapshot before all builds/pulls on a dedicated runner.
+The scan includes pre-existing images, images reused by cached builds, untagged
+images, and pulled base/helper images, not only this job's build outputs. Use a
+dedicated runner: every visible local image is inventoried and uploaded. Images
+removed before scanning and BuildKit-only cache stages cannot be discovered in
+Docker's image store. An empty store records an empty image array and a notice,
+not an error.
 
 Plain `docker build` normally loads images locally. For single-platform Buildx
 builds, use `load: true` when compatible with your export/attestation settings,
@@ -123,4 +118,5 @@ bash .github/actions/runner-image-sbom/test.sh
 ```
 
 The tests execute the actual inline Bash blocks with mocked Docker/Syft commands,
-covering discovery, deduplication, metadata, checksums, empty images, and errors.
+covering pre-existing and untagged images, deduplication, metadata, checksums,
+empty images, and errors.

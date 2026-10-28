@@ -15,29 +15,31 @@ export PRIVATE_CREDENTIAL=must-not-be-copied
 old="sha256:$(printf '%064d' 0)"
 first="sha256:$(printf '%064d' 1)"
 second="sha256:$(printf '%064d' 2)"
+export UNTAGGED_IMAGE="$second"
 
-# Exercise the actual inline Bash blocks without adding a YAML dependency.
-for step in validate snapshot scan; do
-  awk -v step="$step" '
-    {sub(/\r$/, "")}
-    $0 == "      id: " step {found=1}
-    found && /^      run: \|$/ {script=1; next}
-    script && /^        / {print substr($0, 9); next}
-    script && NF {exit}
-  ' "$action" > "$root/$step.sh"
-  test -s "$root/$step.sh"
-  bash -n "$root/$step.sh"
-done
+# Exercise the actual inline Bash block without adding a YAML dependency.
+awk '
+  {sub(/\r$/, "")}
+  $0 == "      id: scan" {found=1}
+  found && /^      run: \|$/ {script=1; next}
+  script && /^        / {print substr($0, 9); next}
+  script && NF {exit}
+' "$action" > "$root/scan.sh"
+test -s "$root/scan.sh"
+bash -n "$root/scan.sh"
 
 cat > "$root/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1 $2" in
-  "image ls") test "${FAIL_LIST:-0}" = 0; cat "$TEST_IMAGES" ;;
+  "image ls")
+    test "$*" = "image ls --all --quiet --no-trunc"
+    test "${FAIL_LIST:-0}" = 0
+    cat "$TEST_IMAGES" ;;
   "image inspect")
     test "${FAIL_INSPECT:-}" != "$3"
-    jq -n '[{
-      RepoTags: ["example:ci", "example:alias"], RepoDigests: [],
+    jq -n --arg image "$3" --arg untagged "$UNTAGGED_IMAGE" '[{
+      RepoTags: (if $image == $untagged then [] else ["example:ci", "example:alias"] end), RepoDigests: [],
       Os: "linux", Architecture: "amd64", Created: "2026-01-01T00:00:00Z",
       Config: {Labels: {"org.opencontainers.image.revision": "commit", "private-label": "omit-me"}}
     }]' ;;
@@ -57,50 +59,52 @@ MOCK
 chmod +x "$root/bin/docker" "$root/bin/syft"
 export SYFT_COMMAND="$root/bin/syft"
 
-snapshot() {
+prepare() {
   unset FAIL_SYFT FAIL_INSPECT FAIL_LIST
   export MOCK_SBOM='{"spdxVersion":"SPDX-2.3","packages":[{"name":"fixture"}]}'
-  printf '%s\n' "$old" "$old" > "$TEST_IMAGES"
+  : > "$TEST_IMAGES"
   : > "$GITHUB_OUTPUT"
   : > "$TEST_SCANS"
-  PHASE=snapshot STATE_DIRECTORY="" bash "$root/validate.sh"
-  bash "$root/snapshot.sh"
-  STATE_DIRECTORY=$(sed -n 's/^state-directory=//p' "$GITHUB_OUTPUT")
-  export STATE_DIRECTORY
-  test "$(wc -l < "$STATE_DIRECTORY/before.txt")" -eq 1
-  PHASE=scan bash "$root/validate.sh"
 }
 
-snapshot
-printf '%s\n' "$second" "$old" "$first" "$first" > "$TEST_IMAGES"
+artifact_directory() {
+  sed -n 's/^artifact-directory=//p' "$GITHUB_OUTPUT"
+}
+
+prepare
+printf '%s\n' "$second" "$old" "$first" "$first" "$old" > "$TEST_IMAGES"
 bash "$root/scan.sh"
-index="$STATE_DIRECTORY/sboms/index.json"
-test "$(wc -l < "$TEST_SCANS")" -eq 2
-jq -e --arg first "$first" --arg second "$second" '
+destination=$(artifact_directory)
+index="$destination/index.json"
+test "$(wc -l < "$TEST_SCANS")" -eq 3
+jq -e --arg old "$old" --arg first "$first" --arg second "$second" '
   .schema_version == 1 and .build.repository == "example/repo" and
   .build.repository_id == "123" and .build.run_attempt == "2" and
   .build.run_url == "https://github.com/example/repo/actions/runs/456" and
-  [.images[].image_id] == [$first, $second] and
+  [.images[].image_id] == [$old, $first, $second] and
+  .images[0].tags == ["example:ci", "example:alias"] and
+  .images[2].tags == [] and
   all(.images[]; .status == "success" and .packages == 1 and
-    .tags == ["example:ci", "example:alias"] and .platform.architecture == "amd64" and
+    .platform.architecture == "amd64" and
     .oci_labels == {"org.opencontainers.image.revision": "commit"})
 ' "$index" > /dev/null
 ! grep -qE 'must-not-be-copied|omit-me' "$index"
-for image in "$first" "$second"; do
-  file="$STATE_DIRECTORY/sboms/${image/:/-}.spdx.json"
+for image in "$old" "$first" "$second"; do
+  grep -qx "docker:$image" "$TEST_SCANS"
+  file="$destination/${image/:/-}.spdx.json"
   jq -e --arg image "$image" --arg hash "$(sha256sum "$file" | cut -d ' ' -f 1)" \
     --argjson size "$(wc -c < "$file")" \
     'any(.images[]; .image_id == $image and .sbom_sha256 == $hash and .sbom_size_bytes == $size)' "$index" > /dev/null
 done
 
-snapshot
+prepare
 bash "$root/scan.sh" > "$root/no-images.log"
-jq -e '.images == []' "$STATE_DIRECTORY/sboms/index.json" > /dev/null
+jq -e '.images == []' "$(artifact_directory)/index.json" > /dev/null
 test ! -s "$TEST_SCANS"
-grep -q '::notice::No new local Docker image IDs' "$root/no-images.log"
+grep -q '::notice::No local Docker images found' "$root/no-images.log"
 
 for failure in syft inspect invalid-json; do
-  snapshot
+  prepare
   printf '%s\n' "$first" "$second" > "$TEST_IMAGES"
   case "$failure" in
     syft) export FAIL_SYFT="docker:$first" ;;
@@ -111,32 +115,28 @@ for failure in syft inspect invalid-json; do
     echo "Expected failure for $failure" >&2
     exit 1
   fi
-  test ! -e "$STATE_DIRECTORY/sboms/${first/:/-}.spdx.json"
-  jq -e '.images[0].status == "failed"' "$STATE_DIRECTORY/sboms/index.json" > /dev/null
+  destination=$(artifact_directory)
+  test ! -e "$destination/${first/:/-}.spdx.json"
+  jq -e '.images[0].status == "failed"' "$destination/index.json" > /dev/null
   grep -q '::error::SBOM generation failed' "$root/failure.log"
   if [[ "$failure" != invalid-json ]]; then
-    jq -e '.images[1].status == "success"' "$STATE_DIRECTORY/sboms/index.json" > /dev/null
+    jq -e '.images[1].status == "success"' "$destination/index.json" > /dev/null
   fi
 done
 
-snapshot
+prepare
 printf '%s\n' "$first" > "$TEST_IMAGES"
 export MOCK_SBOM='{"spdxVersion":"SPDX-2.3","packages":[]}'
 bash "$root/scan.sh"
-jq -e '.images[0].packages == 0' "$STATE_DIRECTORY/sboms/index.json" > /dev/null
+jq -e '.images[0].packages == 0' "$(artifact_directory)/index.json" > /dev/null
 
-snapshot
+prepare
 printf '%s\n' invalid > "$TEST_IMAGES"
 if bash "$root/scan.sh" > /dev/null 2>&1; then exit 1; fi
-if bash "$root/snapshot.sh" > /dev/null 2>&1; then exit 1; fi
-printf '%s\n' "$old" > "$TEST_IMAGES"
-printf '%s\n' invalid > "$STATE_DIRECTORY/before.txt"
-if bash "$root/scan.sh" > /dev/null 2>&1; then exit 1; fi
+test ! -s "$GITHUB_OUTPUT"
 
-snapshot
+prepare
 export FAIL_LIST=1
-if bash "$root/snapshot.sh" > /dev/null 2>&1; then exit 1; fi
 if bash "$root/scan.sh" > /dev/null 2>&1; then exit 1; fi
-if PHASE=wrong bash "$root/validate.sh" > /dev/null 2>&1; then exit 1; fi
-if PHASE=scan STATE_DIRECTORY="$root/missing" bash "$root/validate.sh" > /dev/null 2>&1; then exit 1; fi
-echo "PASS: inline action commands, image discovery, metadata, checksums, and failure handling."
+test ! -s "$GITHUB_OUTPUT"
+echo "PASS: all local images (including pre-existing and untagged), deduplication, metadata, checksums, and failure handling."

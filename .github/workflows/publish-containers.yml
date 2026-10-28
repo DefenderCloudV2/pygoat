@@ -48,12 +48,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Snapshot runner images
-        id: runner-images
-        uses: ./.github/actions/runner-image-sbom
-        with:
-          phase: snapshot
-
       - name: Sign in to Azure using OIDC
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
@@ -133,9 +127,6 @@ jobs:
             echo "PyGoat is intentionally vulnerable. Use only in an isolated learning environment."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Generate SBOMs for new runner images
-        if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+      - name: Generate SBOMs for all runner images
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/runner-image-sbom
-        with:
-          phase: scan
-          state-directory: ${{ steps.runner-images.outputs.state-directory }}

@@ -48,12 +48,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Snapshot runner images
-        id: runner-images
-        uses: ./.github/actions/runner-image-sbom
-        with:
-          phase: snapshot
-
       - name: Build once and export two image archives
         run: |
           set -euo pipefail
@@ -143,12 +137,9 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: Generate SBOMs for new runner images
-        if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+      - name: Generate SBOMs for all runner images
+        if: ${{ !cancelled() }}
         uses: ./.github/actions/runner-image-sbom
-        with:
-          phase: scan
-          state-directory: ${{ steps.runner-images.outputs.state-directory }}
 
   release:
     name: Verify downloaded image and publish prerelease

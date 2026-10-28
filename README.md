@@ -137,28 +137,19 @@ learning environment, never in production.**
 
 All six image-building workflows use `.github/actions/runner-image-sbom`.
 It runs on the **same runner and Docker daemon as the build**, not in a separate
-workflow or job. Add a snapshot after checkout and a scan as the last step:
+workflow or job. Add a single scan as the last step:
 
 ```yaml
 - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-- name: Snapshot runner images
-  id: runner-images
-  uses: ./.github/actions/runner-image-sbom
-  with:
-    phase: snapshot
-
 - run: docker build --tag example:ci .
 
-- name: Generate SBOMs for new runner images
-  if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+- name: Generate SBOMs for all runner images
+  if: ${{ !cancelled() }}
   uses: ./.github/actions/runner-image-sbom
-  with:
-    phase: scan
-    state-directory: ${{ steps.runner-images.outputs.state-directory }}
 ```
 
-The action compares Docker's full image IDs before and after the build, including
-untagged images, and scans each new ID once using pinned Syft v1.55.0 with the
+The action lists all Docker image IDs, including pre-existing and untagged
+images, and scans each unique ID once using pinned Syft v1.55.0 with the
 explicit `docker:` source. Multiple tags for identical image content share one
 SBOM. It inventories the image filesystem without starting a container or
 installing anything into the image. The action uses inline Bash, Docker, jq, and
@@ -168,9 +159,9 @@ Each job uploads `runner-image-sboms-JOB-RUN_ID-RUN_ATTEMPT`, containing SPDX 2.
 JSON files and `index.json` mapping local image IDs, tags, available registry
 digests, and scan results to files. Local image IDs are not registry manifest
 digests. SBOM generation failures fail the job but scanning continues for other
-images and completed results are uploaded. No new images produces an explicit
+images and completed results are uploaded. An empty image store produces an explicit
 notice and an empty index. The final step also runs after earlier failures,
-provided the snapshot succeeded; cancellation or runner loss can prevent it.
+but cancellation or runner loss can prevent it.
 
 Plain `docker build` outputs are scanned directly. The three push-only Buildx
 workflows pull their published image **by immutable digest** into the local
@@ -178,19 +169,19 @@ daemon before scanning, preserving their existing build/export and attestation
 settings. They do not rely on a moving tag. A push-only or cache-only build is
 otherwise invisible to this action; other callers must load such outputs first.
 
-Discovery covers images still present at scan time whose IDs were absent at
-snapshot time. This can include newly pulled base/helper images, not just build
-outputs. Images deleted before the scan, BuildKit-only cache stages, and cached
-builds reusing a pre-existing ID are not included. Use a fresh, dedicated runner
-and snapshot before any builds or pulls. This is a final-step composite action,
-not an automatic JavaScript `post` hook; both invocations are required.
+Discovery covers every image in Docker's local store at scan time, including
+base/helper images and cached builds reusing a pre-existing ID. Images deleted
+before the scan and BuildKit-only cache stages cannot be scanned from that
+store. Use a dedicated runner because every visible local image is inventoried.
+This is a final-step composite action, not an automatic JavaScript `post` hook;
+no snapshot or state-directory input is required.
 It generates unsigned package inventories, not vulnerability scan results or
 security endorsements. The existing signed registry SBOM experiment remains
 separate.
 
 To use this action in another repository, reference
-`DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master` for both steps
-(pin both to the same reviewed commit SHA for production). No helper scripts
+`DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master` in the final step
+(pin to a reviewed commit SHA for production). No helper scripts
 need to be copied into the consuming repository. Optional `artifact-name` and
 `retention-days` inputs support matrix jobs and custom retention.
 See the [reusable action guide](.github/actions/runner-image-sbom/README.md)
