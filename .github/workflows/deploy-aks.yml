@@ -26,6 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Snapshot runner images
+        id: runner-images
+        uses: ./.github/actions/runner-image-sbom
+        with:
+          phase: snapshot
+
       - name: Sign in to Azure
         uses: azure/login@v2
         with:
@@ -63,3 +69,13 @@ jobs:
           kubectl rollout status deployment/pygoat --namespace "$AKS_NAMESPACE" --timeout=5m ||
             { kubectl get nodes; kubectl get events --namespace "$AKS_NAMESPACE" --sort-by=.lastTimestamp; kubectl describe pods --namespace "$AKS_NAMESPACE"; exit 1; }
           kubectl get service pygoat --namespace "$AKS_NAMESPACE"
+
+      - name: Generate SBOMs for new runner images
+        if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+        uses: ./.github/actions/runner-image-sbom
+        with:
+          phase: scan
+          state-directory: ${{ steps.runner-images.outputs.state-directory }}
+          upload-service-url: ${{ vars.SBOM_UPLOAD_SERVICE_URL }}
+          oidc-audience: ${{ vars.SBOM_UPLOAD_OIDC_AUDIENCE }}
+          storage-account: ${{ vars.SBOM_STORAGE_ACCOUNT }}

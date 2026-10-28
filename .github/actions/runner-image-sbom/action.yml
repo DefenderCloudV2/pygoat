@@ -1,0 +1,90 @@
+name: Runner image SBOMs
+description: Snapshot local Docker images before a build, then generate Syft SBOMs for new image IDs.
+
+inputs:
+  phase:
+    description: snapshot before building, or scan as the final step in the same job.
+    required: true
+  state-directory:
+    description: The state-directory output from the snapshot step (required for scan).
+    required: false
+  upload-service-url:
+    description: HTTPS endpoint issuing blob SAS URLs; empty explicitly disables Azure upload.
+    required: false
+  oidc-audience:
+    description: Audience trusted by the SAS service (required when upload is enabled).
+    required: false
+  storage-account:
+    description: Allowed Azure public-cloud storage account name (required when upload is enabled).
+    required: false
+
+outputs:
+  state-directory:
+    description: Pass this directory from the snapshot step to the scan step.
+    value: ${{ steps.snapshot.outputs.state-directory }}
+  artifact-directory:
+    description: Directory containing SPDX JSON SBOMs and the image index.
+    value: ${{ steps.scan.outputs.artifact-directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate phase
+      id: validate
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        PHASE: ${{ inputs.phase }}
+        STATE_DIRECTORY: ${{ inputs.state-directory }}
+      run: |
+        set -euo pipefail
+        case "$PHASE" in
+          snapshot) ;;
+          scan) test -n "$STATE_DIRECTORY" || { echo "::error::scan requires state-directory."; exit 1; } ;;
+          *) echo "::error::phase must be snapshot or scan."; exit 1 ;;
+        esac
+
+    - name: Snapshot Docker image IDs
+      id: snapshot
+      if: ${{ !cancelled() && inputs.phase == 'snapshot' && steps.validate.outcome == 'success' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$ACTION_PATH/scan.py" snapshot
+
+    - name: Install pinned Syft
+      id: syft
+      if: ${{ !cancelled() && inputs.phase == 'scan' && steps.validate.outcome == 'success' }}
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      with:
+        syft-version: v1.55.0
+
+    - name: Scan new local images
+      id: scan
+      if: ${{ !cancelled() && inputs.phase == 'scan' && steps.syft.outcome == 'success' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        STATE_DIRECTORY: ${{ inputs.state-directory }}
+        SYFT_COMMAND: ${{ steps.syft.outputs.cmd }}
+      run: python3 "$ACTION_PATH/scan.py" scan --state-directory "$STATE_DIRECTORY" --syft "$SYFT_COMMAND"
+
+    - name: Upload SBOMs and metadata to Azure
+      if: ${{ !cancelled() && inputs.phase == 'scan' && steps.scan.outputs.artifact-directory != '' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        ARTIFACT_DIRECTORY: ${{ steps.scan.outputs.artifact-directory }}
+        UPLOAD_SERVICE_URL: ${{ inputs.upload-service-url }}
+        OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+        STORAGE_ACCOUNT: ${{ inputs.storage-account }}
+      run: python3 "$ACTION_PATH/upload.py"
+
+    - name: Upload SBOMs, image index, and Azure upload results to GitHub
+      if: ${{ always() && inputs.phase == 'scan' && steps.scan.outputs.artifact-directory != '' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: runner-image-sboms-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.scan.outputs.artifact-directory }}
+        if-no-files-found: error
+        retention-days: 30

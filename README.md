@@ -127,11 +127,89 @@ docker pull pygoat22283822.azurecr.io/pygoat:latest
 GHCR packages are private by default, even for a public source repository.
 Authorized users can authenticate to `ghcr.io` and pull the GHCR image;
 publishing does not change package visibility. Existing AKS deployment and
-archive-attestation workflows are unchanged. This workflow only publishes
-images; it does not deploy PyGoat.
+archive-attestation behavior is unchanged. This workflow publishes images and
+generates SBOM artifacts; it does not deploy PyGoat.
 
 **PyGoat is intentionally vulnerable. Use these images only in an isolated
 learning environment, never in production.**
+
+### Reusable post-build SBOM action
+
+All five image-building workflows use `.github/actions/runner-image-sbom`.
+It runs on the **same runner and Docker daemon as the build**, not in a separate
+workflow or job. Add a snapshot after checkout and a scan as the last step:
+
+```yaml
+- uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+- name: Snapshot runner images
+  id: runner-images
+  uses: ./.github/actions/runner-image-sbom
+  with:
+    phase: snapshot
+
+- run: docker build --tag example:ci .
+
+- name: Generate SBOMs for new runner images
+  if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+  uses: ./.github/actions/runner-image-sbom
+  with:
+    phase: scan
+    state-directory: ${{ steps.runner-images.outputs.state-directory }}
+    upload-service-url: ${{ vars.SBOM_UPLOAD_SERVICE_URL }}
+    oidc-audience: ${{ vars.SBOM_UPLOAD_OIDC_AUDIENCE }}
+    storage-account: ${{ vars.SBOM_STORAGE_ACCOUNT }}
+```
+
+The action compares Docker's full image IDs before and after the build, including
+untagged images, and scans each new ID once using pinned Syft v1.55.0 with the
+explicit `docker:` source. Multiple tags for identical image content share one
+SBOM. It inventories the image filesystem without starting a container or
+installing anything into the image. The Linux runner needs Docker and Python 3.
+
+Each job uploads `runner-image-sboms-JOB-RUN_ID-RUN_ATTEMPT`, containing SPDX 2.3
+JSON files and `index.json` mapping local image IDs, tags, available registry
+digests, and scan results to files. Local image IDs are not registry manifest
+digests. SBOM generation failures fail the job but scanning continues for other
+images and completed results are uploaded. No new images produces an explicit
+notice and an empty index. The final step also runs after earlier failures,
+provided the snapshot succeeded; cancellation or runner loss can prevent it.
+
+Plain `docker build` outputs are scanned directly. The two push-only Buildx
+workflows pull their published image **by immutable digest** into the local
+daemon before scanning, preserving their existing build/export and attestation
+settings. They do not rely on a moving tag. A push-only or cache-only build is
+otherwise invisible to this action; other callers must load such outputs first.
+
+Discovery covers images still present at scan time whose IDs were absent at
+snapshot time. This can include newly pulled base/helper images, not just build
+outputs. Images deleted before the scan, BuildKit-only cache stages, and cached
+builds reusing a pre-existing ID are not included. Use a fresh, dedicated runner
+and snapshot before any builds or pulls. This is a final-step composite action,
+not an automatic JavaScript `post` hook; both invocations are required.
+It generates unsigned package inventories, not vulnerability scan results or
+security endorsements. The existing signed registry SBOM experiment remains
+separate.
+
+#### Azure storage upload
+
+The same action can upload each SBOM **and its metadata index** to Azure Blob
+Storage. It requests a short-lived SAS URL from a configurable HTTPS service
+using GitHub OIDC, then uploads directly to the allowed storage account. The
+index records repository/workflow identity, commit/ref, run ID/attempt and URL,
+job, image IDs/tags/registry digests/platform, and SBOM checksums and sizes.
+
+Configure `SBOM_UPLOAD_SERVICE_URL`, `SBOM_UPLOAD_OIDC_AUDIENCE`, and
+`SBOM_STORAGE_ACCOUNT` to enable it. The calling job requires `id-token: write`
+(already present in the five integrated workflows). With no configuration,
+Azure upload is explicitly skipped with a warning; GitHub artifacts remain
+available. Once configured, upload failures fail the job, and sanitized
+`upload-results.json` is retained with the GitHub artifact. Tokens and SAS query
+strings are never saved in the artifacts.
+
+The SAS service and storage account must be provisioned separately. See the
+[OIDC/SAS service contract](.github/actions/runner-image-sbom/README.md) for
+request/response schemas, broker authorization requirements, upload headers,
+and metadata retention details.
 
 ### Simple ACR-only metadata experiment
 
@@ -147,7 +225,7 @@ build arguments, attestations, or provenance flags, and does not use
 gh workflow run publish-acr-simple.yml --repo DefenderCloudV2/pygoat --ref master
 ```
 
-The final step prints image configuration labels, the registry manifest, and
+The metadata inspection step prints image configuration labels, the registry manifest, and
 any Git commit and origin URL found in `/app/.git`, without starting PyGoat.
 It leaves Docker's default build behavior intact so the logs show what this
 simple build actually produces. Distinguish these sources of information:
