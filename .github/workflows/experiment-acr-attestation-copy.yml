@@ -1,0 +1,183 @@
+name: Experiment with ACR attestation storage and copying
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  experiment:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      ACR_NAME: ${{ vars.CONTAINER_ACR_NAME }}
+      ACR_RESOURCE_GROUP: ${{ vars.CONTAINER_ACR_RESOURCE_GROUP }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Test evidence checks
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/acr-copy-evidence"
+          echo "EVIDENCE=$RUNNER_TEMP/acr-copy-evidence" >> "$GITHUB_ENV"
+          python -m unittest discover -s scripts -p 'test_acr_attestation_copy.py' -v
+
+      - name: Sign in to Azure
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.CONTAINER_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.CONTAINER_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.CONTAINER_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign in to ACR and isolate experiment repositories
+        id: image
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          login_server=$(az acr show --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP" --query loginServer --output tsv)
+          az acr login --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP"
+          root="$login_server/pygoat-metadata-experiment/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "ROOT=$root" >> "$GITHUB_ENV"
+          echo "name=$root/source" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Install checksum-verified copy tools and record versions
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/crane-download"
+          mkdir -p "$tools" "$RUNNER_TEMP/experiment-bin"
+          gh release download v0.22.1 --repo google/go-containerregistry \
+            --pattern go-containerregistry_Linux_x86_64.tar.gz --pattern checksums.txt --dir "$tools"
+          gh release download v1.3.6 --repo oras-project/oras \
+            --pattern oras_1.3.6_linux_amd64.tar.gz --pattern oras_1.3.6_checksums.txt --dir "$tools"
+          (
+            cd "$tools"
+            grep ' go-containerregistry_Linux_x86_64.tar.gz$' checksums.txt | sha256sum --check --strict
+            tar -xzf go-containerregistry_Linux_x86_64.tar.gz -C "$RUNNER_TEMP/experiment-bin" crane
+            grep ' oras_1.3.6_linux_amd64.tar.gz$' oras_1.3.6_checksums.txt | sha256sum --check --strict
+            tar -xzf oras_1.3.6_linux_amd64.tar.gz -C "$RUNNER_TEMP/experiment-bin" oras
+          )
+          echo "$RUNNER_TEMP/experiment-bin" >> "$GITHUB_PATH"
+          {
+            docker buildx version
+            docker buildx inspect --bootstrap
+            "$RUNNER_TEMP/experiment-bin/oras" version
+            "$RUNNER_TEMP/experiment-bin/crane" version
+            gh version
+          } > "$EVIDENCE/tool-versions.txt"
+
+      - name: Build and push index with BuildKit provenance and SBOM
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:experiment
+          provenance: true
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Inspect BuildKit metadata before signing
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          echo "DIGEST=$DIGEST" >> "$GITHUB_ENV"
+          python scripts/acr_attestation_copy.py inspect \
+            --image "$ROOT/source@$DIGEST" --output "$EVIDENCE/source-before"
+
+      - name: Attach signed provenance to index digest
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attach signed SBOM to index digest
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ env.EVIDENCE }}/source-before/sbom.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Inspect signed referrers and copy between fresh ACR repositories
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$PROVENANCE_BUNDLE" "$EVIDENCE/provenance.sigstore.json"
+          cp "$SBOM_BUNDLE" "$EVIDENCE/sbom.sigstore.json"
+          test "$(crane digest "$ROOT/source:experiment")" = "$DIGEST"
+          python scripts/acr_attestation_copy.py inspect \
+            --image "$ROOT/source@$DIGEST" --output "$EVIDENCE/source-signed"
+          crane copy "$ROOT/source@$DIGEST" "$ROOT/crane:experiment"
+          oras copy "$ROOT/source@$DIGEST" "$ROOT/oras-plain:experiment"
+          oras copy --recursive \
+            --from-distribution-spec v1.1-referrers-api \
+            --to-distribution-spec v1.1-referrers-api \
+            "$ROOT/source@$DIGEST" "$ROOT/oras-recursive:experiment"
+          for target in crane oras-plain oras-recursive; do
+            test "$(crane digest "$ROOT/$target:experiment")" = "$DIGEST"
+            python scripts/acr_attestation_copy.py inspect \
+              --image "$ROOT/$target@$DIGEST" --output "$EVIDENCE/$target"
+          done
+          python scripts/acr_attestation_copy.py compare --output "$EVIDENCE"
+
+      - name: Verify signed provenance and SBOM fetched from source and recursive copy
+        run: |
+          set -euo pipefail
+          policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/experiment-acr-attestation-copy.yml"
+            --source-digest "$GITHUB_SHA"
+            --source-ref "$GITHUB_REF"
+            --deny-self-hosted-runners
+          )
+          for target in source oras-recursive; do
+            gh attestation verify "oci://$ROOT/$target@$DIGEST" "${policy[@]}" \
+              --bundle-from-oci --predicate-type https://slsa.dev/provenance/v1 \
+              --format json > "$EVIDENCE/$target-provenance-verification.json"
+            gh attestation verify "oci://$ROOT/$target@$DIGEST" "${policy[@]}" \
+              --bundle-from-oci --predicate-type https://spdx.dev/Document/v2.3 \
+              --format json > "$EVIDENCE/$target-sbom-verification.json"
+            jq -e --slurpfile sbom "$EVIDENCE/source-before/sbom.spdx.json" \
+              'any(.[]; .verificationResult.statement.predicate == $sbom[0])' \
+              "$EVIDENCE/$target-sbom-verification.json"
+          done
+          cat "$EVIDENCE/comparison.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "Signed provenance and SBOM verified from ACR for source and recursive copy." >> "$GITHUB_STEP_SUMMARY"
+          echo "PyGoat is intentionally vulnerable. No application was deployed." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw metadata and verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: acr-attestation-copy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          if-no-files-found: warn
+          retention-days: 30
