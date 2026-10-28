@@ -155,16 +155,14 @@ workflow or job. Add a snapshot after checkout and a scan as the last step:
   with:
     phase: scan
     state-directory: ${{ steps.runner-images.outputs.state-directory }}
-    upload-service-url: ${{ vars.SBOM_UPLOAD_SERVICE_URL }}
-    oidc-audience: ${{ vars.SBOM_UPLOAD_OIDC_AUDIENCE }}
-    storage-account: ${{ vars.SBOM_STORAGE_ACCOUNT }}
 ```
 
 The action compares Docker's full image IDs before and after the build, including
 untagged images, and scans each new ID once using pinned Syft v1.55.0 with the
 explicit `docker:` source. Multiple tags for identical image content share one
 SBOM. It inventories the image filesystem without starting a container or
-installing anything into the image. The Linux runner needs Docker and Python 3.
+installing anything into the image. The action uses inline Bash, Docker, jq, and
+GNU coreutils commands; it has no Python runtime dependency.
 
 Each job uploads `runner-image-sboms-JOB-RUN_ID-RUN_ATTEMPT`, containing SPDX 2.3
 JSON files and `index.json` mapping local image IDs, tags, available registry
@@ -190,26 +188,18 @@ It generates unsigned package inventories, not vulnerability scan results or
 security endorsements. The existing signed registry SBOM experiment remains
 separate.
 
-#### Azure storage upload
+To use this action in another repository, reference
+`DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master` for both steps
+(pin both to the same reviewed commit SHA for production). No helper scripts
+need to be copied into the consuming repository. Optional `artifact-name` and
+`retention-days` inputs support matrix jobs and custom retention.
+See the [reusable action guide](.github/actions/runner-image-sbom/README.md)
+for a complete cross-repository example and artifact download APIs.
 
-The same action can upload each SBOM **and its metadata index** to Azure Blob
-Storage. It requests a short-lived SAS URL from a configurable HTTPS service
-using GitHub OIDC, then uploads directly to the allowed storage account. The
-index records repository/workflow identity, commit/ref, run ID/attempt and URL,
-job, image IDs/tags/registry digests/platform, and SBOM checksums and sizes.
-
-Configure `SBOM_UPLOAD_SERVICE_URL`, `SBOM_UPLOAD_OIDC_AUDIENCE`, and
-`SBOM_STORAGE_ACCOUNT` to enable it. The calling job requires `id-token: write`
-(already present in the six integrated workflows). With no configuration,
-Azure upload is explicitly skipped with a warning; GitHub artifacts remain
-available. Once configured, upload failures fail the job, and sanitized
-`upload-results.json` is retained with the GitHub artifact. Tokens and SAS query
-strings are never saved in the artifacts.
-
-The SAS service and storage account must be provisioned separately. See the
-[OIDC/SAS service contract](.github/actions/runner-image-sbom/README.md) for
-request/response schemas, broker authorization requirements, upload headers,
-and metadata retention details.
+SBOMs are uploaded **only as GitHub artifacts**. No Azure Storage upload or
+Entra/OIDC configuration is required by this action. The index retains build,
+image, and checksum metadata so a GitHub App with **Actions: read** permission
+can retrieve and correlate the artifacts later.
 
 ### Simple ACR-only metadata experiment
 

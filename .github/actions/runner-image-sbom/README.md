@@ -1,177 +1,126 @@
-# Azure SBOM upload service contract
+# Runner image SBOMs
 
-The action implements a client for a **separately deployed SAS broker**. This
-repository does not deploy the broker or create a storage account. An Azure
-Function or another HTTPS service can implement the following contract.
+A reusable composite action using **Bash, Docker, jq, and Syft**. All runtime
+commands live in `action.yml`; no Python scripts, Azure credentials, OIDC
+configuration, or copied helper files are needed.
 
-## Configuration
+It snapshots the job's Docker images before building, then scans newly available
+image IDs and uploads SPDX JSON SBOMs plus build/image metadata to GitHub Actions.
+Both invocations must run in the **same job**, against the same Docker daemon.
 
-Configure all three repository/environment Actions variables:
+## Use from another repository
 
-| Variable | Action input | Meaning |
-| --- | --- | --- |
-| `SBOM_UPLOAD_SERVICE_URL` | `upload-service-url` | Full HTTPS POST endpoint, for example `https://sbom-service.example.com/v1/uploads`. No query string or embedded credentials. |
-| `SBOM_UPLOAD_OIDC_AUDIENCE` | `oidc-audience` | Exact audience the broker accepts, for example `api://sbom-uploads`. |
-| `SBOM_STORAGE_ACCOUNT` | `storage-account` | Azure public-cloud account name whose blob host the client permits. |
+```yaml
+name: Build image and generate SBOM
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
 
-The calling job needs `permissions: {contents: read, id-token: write}`. All six
-integrated image-building jobs already have these permissions. No account key,
-pre-generated SAS, or client secret is configured in GitHub.
+permissions:
+  contents: read
 
-With all inputs empty, Azure upload is explicitly **skipped**, with a warning,
-summary, and `upload-results.json`; GitHub artifact upload still runs. Partial
-configuration fails. Once enabled, any authorization, metadata-integrity, or
-upload failure fails the action, while completed SBOMs remain downloadable in
-the GitHub artifact. Successful scans are uploaded even if another image scan
-failed. A scan with no images still uploads its index.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-## Request flow
+      - name: Snapshot runner images
+        id: runner-images
+        uses: DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master
+        with:
+          phase: snapshot
 
-1. Read the generated `index.json` and validate each SBOM's SHA-256 and length.
-2. Obtain a fresh GitHub OIDC token for the configured audience for each file.
-3. POST its build/image metadata to the broker using that token.
-4. PUT the exact file bytes to the returned Azure blob SAS URL.
-5. Repeat for each successful SBOM and then `index.json`, which durably captures
-   the build metadata and all image scan results alongside the SBOMs.
+      - name: Build
+        run: docker build --tag example:ci .
 
-The OIDC token is sent only to the configured broker. Azure receives only the
-SAS, never the OIDC bearer token. Requests reject redirects. Transient HTTP
-408/429/500/502/503/504 and network errors get at most three attempts with
-backoff, and each request has a 60-second timeout. Authorization failures are
-not retried. Each broker POST has a stable `Idempotency-Key` equal to the SHA-256
-of its exact request body; the broker must return the same blob destination for
-retries of that key.
-
-## POST contract
-
-Headers:
-
-```http
-Authorization: Bearer <GitHub OIDC JWT>
-Content-Type: application/json
-Idempotency-Key: <SHA-256 of request bytes>
+      - name: Upload image SBOMs
+        if: ${{ !cancelled() && steps.runner-images.outcome == 'success' }}
+        uses: DefenderCloudV2/pygoat/.github/actions/runner-image-sbom@master
+        with:
+          phase: scan
+          state-directory: ${{ steps.runner-images.outputs.state-directory }}
 ```
 
-JSON request shape (hashes and identifiers below are placeholders):
+The example tracks `master`; pin **both** references to the same reviewed full
+commit SHA for production. The consuming job's repository, commit, and run
+populate the metadata, not this action's repository. There is no need to check
+out this action's source separately. Within this repository, use
+`./.github/actions/runner-image-sbom` after checkout instead.
 
-```json
-{
-  "schema_version": 1,
-  "scan_id": "12345678-1234-1234-1234-123456789abc",
-  "generated_at": "2026-01-01T00:00:00+00:00",
-  "build": {
-    "repository": "owner/repository",
-    "repository_id": "123",
-    "repository_owner_id": "456",
-    "sha": "<commit SHA>",
-    "ref": "refs/heads/master",
-    "workflow": "Publish containers to ACR and GHCR",
-    "workflow_ref": "owner/repository/.github/workflows/publish-containers.yml@refs/heads/master",
-    "workflow_sha": "<workflow commit SHA>",
-    "run_id": "789",
-    "run_attempt": "1",
-    "job": "publish",
-    "event_name": "push",
-    "server_url": "https://github.com",
-    "run_url": "https://github.com/owner/repository/actions/runs/789",
-    "runner": {"os": "Linux", "arch": "X64"}
-  },
-  "artifact": {
-    "name": "sha256-<64 lowercase hex characters>.spdx.json",
-    "kind": "sbom",
-    "content_type": "application/spdx+json",
-    "size_bytes": 12345,
-    "sha256": "<SHA-256 of the SBOM bytes>"
-  },
-  "image": {
-    "image_id": "sha256:<local Docker image ID>",
-    "status": "success",
-    "tags": ["registry.example.com/image:commit"],
-    "repo_digests": ["registry.example.com/image@sha256:<manifest digest>"],
-    "platform": {"os": "linux", "architecture": "amd64", "variant": null},
-    "image_created_at": "<Docker image creation timestamp>",
-    "oci_labels": {"org.opencontainers.image.revision": "<commit SHA>"},
-    "packages": 42,
-    "sbom": "sha256-<64 lowercase hex characters>.spdx.json",
-    "sbom_sha256": "<SHA-256 of the SBOM bytes>",
-    "sbom_size_bytes": 12345
-  }
-}
+The source repository must be accessible to the caller and allowed by its
+Actions policy. If private, configure action sharing for the permitted
+repositories. No additional artifact-upload permission or Entra setup is needed.
+
+## Inputs and outputs
+
+| Input | Meaning |
+| --- | --- |
+| `phase` | Required: `snapshot` before building or `scan` afterward. |
+| `state-directory` | Required for `scan`: the snapshot step's output of the same name. |
+| `artifact-name` | Optional override; default `runner-image-sboms-JOB-RUN_ID-RUN_ATTEMPT`. Give each matrix job or repeated scan a unique name. |
+| `retention-days` | Optional GitHub artifact retention; defaults to `30`, subject to repository limits. |
+
+The snapshot exposes `state-directory`; the scan exposes `artifact-directory`.
+Snapshot state is temporary internal data, not an interchange format. A
+`scan_id` is an opaque identifier derived from the unique snapshot directory.
+
+## Artifact contents
+
+- `sha256-<image-id>.spdx.json`: one Syft SPDX 2.3 SBOM per new local image ID.
+- `index.json`: scan ID/time; repository and workflow identity; commit/ref;
+  run ID/attempt/URL; job and runner OS/architecture; image IDs, tags, registry
+  digests, platform and creation time; selected OCI labels; package counts;
+  SBOM SHA-256 checksums and byte sizes; and per-image success/failure.
+
+Only OCI source/revision/version labels are included, not arbitrary labels or
+environment variables. Syft's version is also recorded in the SBOM's
+`creationInfo`. Local image IDs, registry digests, commits, and SBOM checksums are
+different identifiers; the index preserves each separately.
+
+No Azure upload occurs, and no `upload-results.json` is generated. A future
+GitHub App can download the artifact with repository **Actions: read** permission:
+
+```text
+GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts
+GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip
 ```
 
-For `index.json`, `artifact.kind` is `index`, `content_type` is
-`application/json`, and `image` is `null`. The index contains `schema_version`,
-`scan_id`, `generated_at`, `build`, and the full `images` array. Absent local
-image metadata is `null` or an empty list/object. Only the OCI source, revision,
-and version labels are copied, not arbitrary labels or runner environment
-variables. The SBOM's own `creationInfo` identifies Syft and its version.
+Use an installation access token, paginate the artifact list, and follow the
+download redirect. Retrieve artifacts before their retention period expires.
 
-Local Docker image IDs, registry manifest digests, source commits, and SBOM
-checksums identify **different things**. Preserve them separately. Build
-metadata describes the workflow context; it does not prove image provenance.
-Labels and client-supplied fields must not be used as authentication evidence.
+## Behavior and requirements
 
-Return HTTP **200**:
+Use a Linux runner with Docker, Bash, jq, and GNU coreutils (`sort`, `comm`,
+`sha256sum`, `timeout`, etc.); GitHub-hosted Ubuntu runners include these tools.
+The action installs pinned Syft. It does not run the application container.
 
-```json
-{
-  "upload_url": "https://ACCOUNT.blob.core.windows.net/CONTAINER/BLOB?sv=...&spr=https&sr=b&sp=cw&se=...&sig=..."
-}
+Docker IDs are deduplicated, so multiple tags for the same image share an SBOM.
+The scan includes untagged images and newly pulled images, not only build
+outputs. Pre-existing IDs, images removed before scanning, and BuildKit-only
+cache stages are excluded. An empty scan records an empty image array and a
+notice, not an error. Snapshot before all builds/pulls on a dedicated runner.
+
+Plain `docker build` normally loads images locally. For single-platform Buildx
+builds, use `load: true` when compatible with your export/attestation settings,
+or pull a published image by immutable digest before the final scan. A separate
+job does not share the original runner's image store.
+
+Each image scan has a ten-minute timeout. Failed scans are recorded, partial
+SBOM files are removed, other images are still scanned, and the step fails.
+Completed SBOMs and the index are uploaded even after a scan failure. The final
+step can run after earlier job failures; cancellation or runner loss may prevent
+it. This is a final-step action, not an automatic JavaScript `post` hook.
+
+These are unsigned package inventories, not vulnerability scan results or
+security endorsements.
+
+## Testing
+
+```sh
+bash .github/actions/runner-image-sbom/test.sh
 ```
 
-Return 400 for invalid metadata, 401 for an invalid token, and 403 for a valid
-identity outside policy. Do not redirect. Do not include secrets in error
-messages; the client intentionally reports only HTTP status codes.
-
-## Broker authorization and storage responsibilities
-
-- Verify the JWT signature using GitHub's OIDC discovery/JWKS, pin the issuer
-  `https://token.actions.githubusercontent.com`, require the configured audience,
-  and validate expiry/not-before and allowed algorithms. Never just decode it.
-- Authorize an allowlist of immutable repository/owner IDs, workflow refs,
-  branches/tags or environments, and event types. Reject untrusted fork/PR
-  contexts unless explicitly intended. This repository uses immutable OIDC
-  subjects; do not assume the legacy `repo:owner/name:...` subject shape.
-- Compare request repository, commit/ref, run ID/attempt, and workflow identity
-  against signed claims. Derive tenant/storage prefixes from verified identity,
-  not arbitrary client paths. Job names and image labels are metadata, not
-  signed authorization claims.
-- Use the broker's managed identity with narrowly scoped Azure RBAC to issue
-  a **user-delegation SAS**, rather than exposing storage account keys.
-- Return HTTPS-only, single-blob SAS grants (`sr=b`, `spr=https`) with only write
-  (`sp=w`) or create/write (`sp=cw`) permission and a short lifetime (for example,
-  15 minutes). The client rejects other accounts, container/account-level
-  grants, and read/list/delete permissions. Only Azure public-cloud
-  `ACCOUNT.blob.core.windows.net` hosts are supported.
-- Choose deterministic object paths, for example
-  `repository-id/run-id/run-attempt/job/scan-id/artifact-name`. The scan UUID
-  separates matrix jobs sharing a job ID. Bind idempotency keys to the verified
-  identity, file hash, size, and destination; reject conflicting reuse.
-- Validate metadata schemas and enforce quotas. SAS grants themselves cannot
-  enforce the advertised content hash or length: validate uploaded blobs against
-  the grant metadata server-side, for example from a BlobCreated event, before
-  treating them as accepted. A client-reported successful PUT is not a signed
-  attestation or proof of trust.
-- Redact JWTs and SAS query strings from service/access logs. Do not log request
-  authorization headers or return credentials other than the intended blob SAS.
-
-## Azure PUT and retained evidence
-
-The client sends `x-ms-blob-type: BlockBlob`, `x-ms-version: 2023-11-03`,
-the content type, and `Content-MD5` for Azure's transport-integrity validation.
-`x-ms-meta-sbom_sha256` and `x-ms-meta-scan_id` correlate the blob with the
-request and index. Azure must return HTTP **201**.
-
-Repeated PUTs use the same bytes and blob destination, so an ambiguous transient
-failure can be retried safely with write permission. The broker should prevent
-different content from being granted the same destination.
-
-`upload-results.json` is retained in the **GitHub artifact**, not recursively
-uploaded. It records each file's SHA-256, success/failure, and query-free blob
-URL on success. It never persists SAS URLs or OIDC tokens. The Azure index
-captures scan results, not upload results; failed uploads may leave a partial
-set in storage, explicitly reported by the failed job and GitHub evidence.
-
-References:
-[GitHub OIDC](https://docs.github.com/en/actions/reference/security/oidc),
-[Azure Put Blob](https://learn.microsoft.com/en-us/rest/api/storageservices/put-blob).
+The tests execute the actual inline Bash blocks with mocked Docker/Syft commands,
+covering discovery, deduplication, metadata, checksums, empty images, and errors.

@@ -139,6 +139,3 @@ jobs:
         with:
           phase: scan
           state-directory: ${{ steps.runner-images.outputs.state-directory }}
-          upload-service-url: ${{ vars.SBOM_UPLOAD_SERVICE_URL }}
-          oidc-audience: ${{ vars.SBOM_UPLOAD_OIDC_AUDIENCE }}
-          storage-account: ${{ vars.SBOM_STORAGE_ACCOUNT }}

@@ -86,10 +86,9 @@ Partial evidence is uploaded on failures, and failed checks remain failures.
 
 The job also pulls the source image by its published digest and runs the shared
 runner-image SBOM action as a final step. Its separate `runner-image-sboms-*`
-artifact contains unsigned Syft SBOMs and build/image metadata, with optional
-OIDC/SAS upload to Azure Storage when configured. This does not replace or
-modify the BuildKit SBOM or signed attestations used by the copy experiment.
-See the [upload service contract](../.github/actions/runner-image-sbom/README.md).
+artifact contains unsigned Syft SBOMs and build/image metadata. This does not
+replace or modify the BuildKit SBOM or signed attestations used by the copy experiment.
+See the [reusable action guide](../.github/actions/runner-image-sbom/README.md).
 
 **PyGoat is intentionally vulnerable. This experiment publishes images but does
 not run the application or expose any endpoint.**
