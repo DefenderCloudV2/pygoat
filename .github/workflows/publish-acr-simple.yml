@@ -29,6 +29,12 @@ jobs:
           tenant-id: ${{ vars.CONTAINER_AZURE_TENANT_ID }}
           subscription-id: ${{ vars.CONTAINER_AZURE_SUBSCRIPTION_ID }}
 
+      - name: Start pushed-image discovery
+        id: push-monitor
+        uses: ./.github/actions/discover-pushed-images
+        with:
+          phase: start
+
       - name: Build image
         shell: bash
         run: |
@@ -44,6 +50,26 @@ jobs:
           set -euo pipefail
           az acr login --name "$ACR_NAME" --resource-group "$ACR_RESOURCE_GROUP"
           docker push "$IMAGE"
+
+      - name: Collect Docker publications
+        id: discovered
+        if: ${{ !cancelled() && steps.push-monitor.outcome == 'success' }}
+        uses: ./.github/actions/discover-pushed-images
+        with:
+          phase: collect
+          state-directory: ${{ steps.push-monitor.outputs.state-directory }}
+
+      - name: Generate SBOMs for discovered publications
+        if: ${{ !cancelled() && steps.discovered.outputs.report-path != '' }}
+        uses: ./.github/actions/runner-registry-image-sbom
+        with:
+          registry-images: ${{ steps.discovered.outputs.registry-images }}
+          discovery-report: ${{ steps.discovered.outputs.report-path }}
+          scan-local-images: "false"
+          exclude-images: |
+            ghcr.io/github/**
+            moby/**
+            ghcr.io/dependabot/**
 
       - name: Inspect image metadata without starting the application
         shell: bash

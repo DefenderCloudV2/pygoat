@@ -36,6 +36,7 @@ jobs:
           cache: pip
       - name: Test image SBOM actions
         run: |
+          bash .github/actions/discover-pushed-images/test.sh
           bash .github/actions/runner-image-sbom/test.sh
           bash .github/actions/runner-registry-image-sbom/test.sh
       - run: pip install "setuptools<61" wheel

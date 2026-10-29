@@ -190,9 +190,25 @@ for a complete cross-repository example and artifact download APIs.
 A separate [local-plus-registry action](.github/actions/runner-registry-image-sbom/README.md)
 is available at `.github/actions/runner-registry-image-sbom`. It scans every local
 image plus explicit published digest references using Syft's `registry:` source,
-without pulling those references into Docker. `publish-containers.yml` runs it
-before the existing pull and original scanner, producing separate
+without pulling those references into Docker. Local scanning can be disabled.
+The [pushed-image discovery action](.github/actions/discover-pushed-images/README.md)
+adds explicit `start`/`collect` steps around the build. It captures live Docker
+push events and extracts repository names and immutable digests from Buildx
+output metadata; it does not infer publications from image creation timestamps
+or BuildKit cache. Docker event tags are resolved at collection time, so use
+unique tags or immutable output metadata if tags may be overwritten.
+`publish-containers.yml` now discovers both ACR and GHCR references, then scans
+only those publications before the existing pull and original scanner.
+`publish-acr-simple.yml` uses the same discovery with ordinary Docker push events.
+Both retain discovery evidence in `discovery.json` and produce separate
 `runner-registry-image-sboms-...` and `runner-image-sboms-...` artifacts for comparison.
+The new action's `exclude-images` input is configured here with `ghcr.io/github/**`,
+`moby/**`, and `ghcr.io/dependabot/**`. Matching sources are recorded as excluded
+in its index. Incidental local helpers are not selected in publication-only mode;
+the original action stays unfiltered for comparison.
+The new action exports both SPDX and CycloneDX JSON for each successful scan;
+its index records each file's name, checksum, size, and package/component count.
+The original action remains SPDX-only.
 The registry platform defaults to `linux/amd64`; multi-platform consumers must
 invoke it separately for each platform. Private registry login is required.
 

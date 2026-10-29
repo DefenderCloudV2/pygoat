@@ -1,0 +1,40 @@
+name: Discover pushed images
+description: Capture Docker push events and combine them with successful Buildx push metadata to discover immutable registry references.
+
+inputs:
+  phase:
+    description: Use start before building or pushing, then collect after all pushes.
+    required: true
+  state-directory:
+    description: State directory returned by the start invocation.
+    required: false
+  buildx-metadata:
+    description: Metadata JSON from a successful Buildx push, or an array of such objects.
+    required: false
+  buildx-metadata-files:
+    description: Optional newline-separated metadata files from successful docker buildx build --push --metadata-file invocations.
+    required: false
+
+outputs:
+  state-directory:
+    description: Job-scoped Docker event capture directory.
+    value: ${{ steps.discover.outputs.state-directory }}
+  registry-images:
+    description: Newline-separated immutable registry references suitable for the SBOM action.
+    value: ${{ steps.discover.outputs.registry-images }}
+  report-path:
+    description: Discovery JSON recording references, evidence, warnings, and errors.
+    value: ${{ steps.discover.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Discover Docker and Buildx pushes
+      id: discover
+      shell: bash
+      env:
+        DISCOVERY_PHASE: ${{ inputs.phase }}
+        DISCOVERY_STATE: ${{ inputs.state-directory }}
+        BUILDX_METADATA: ${{ inputs.buildx-metadata }}
+        BUILDX_METADATA_FILES: ${{ inputs.buildx-metadata-files }}
+      run: bash "$GITHUB_ACTION_PATH/discover.sh"
