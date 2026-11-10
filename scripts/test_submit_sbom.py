@@ -184,6 +184,18 @@ class SubmissionTests(unittest.TestCase):
                         with self.assertRaises(RuntimeError):
                             client.preflight()
 
+    def test_issuer_diagnostics_never_include_raw_challenge(self):
+        challenge = (
+            'Bearer error="invalid_token", error_description="'
+            "IDX10205: The issuer 'https://token.actions.githubusercontent.com' is invalid. "
+            "ValidIssuer: 'null' or ValidIssuers: 'null'. " + SECRET + '"'
+        )
+        result = client.safe_http_diagnostics({"WWW-Authenticate": challenge}, b"")
+        self.assertEqual(result["identityModelErrorCodes"], ["IDX10205"])
+        self.assertTrue(result["githubActionsIssuerRejected"])
+        self.assertTrue(result["serverIssuerAllowlistMissing"])
+        self.assertNotIn(SECRET, json.dumps(result))
+
     def test_redirects_cannot_forward_credentials(self):
         self.assertIsNone(client.NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere"))
 

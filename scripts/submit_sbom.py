@@ -239,6 +239,22 @@ def safe_http_diagnostics(headers, body):
     hints = sorted({category for word, category in categories.items() if word in challenge.lower()})
     if hints:
         diagnostics["authenticationHints"] = hints
+    codes = sorted(set(re.findall(r"\bIDX[0-9]{5}\b", challenge)))
+    if codes:
+        diagnostics["identityModelErrorCodes"] = codes
+    if re.search(
+        r"The issuer ['\"]https://token\.actions\.githubusercontent\.com['\"] is invalid",
+        challenge,
+        re.IGNORECASE,
+    ):
+        diagnostics["githubActionsIssuerRejected"] = True
+    missing_issuers = re.search(
+        r"ValidIssuer: ['\"]null['\"].*ValidIssuers: ['\"]null['\"]",
+        challenge,
+        re.IGNORECASE,
+    )
+    if missing_issuers:
+        diagnostics["serverIssuerAllowlistMissing"] = True
     if headers.get("Date"):
         try:
             diagnostics["serverDate"] = parsedate_to_datetime(headers["Date"]).isoformat()
