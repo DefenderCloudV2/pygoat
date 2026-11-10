@@ -5,7 +5,7 @@ WORKDIR /app
 
 # set environment variables
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y dnsutils=1:9.18.49-1~deb12u2 \
+    && apt-get install --no-install-recommends -y dnsutils=1:9.18.49-1~deb12u3 \
     && rm -rf /var/lib/apt/lists/*
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
