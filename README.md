@@ -182,6 +182,19 @@ approved service diagnostics before any rerun. A workflow rerun can resubmit an
 already accepted snapshot; the upload ID is not an idempotency key. Workflow runs
 are serialized without cancelling an active run.
 
+For complete completion-response diagnostics, supply a **public** PEM encryption
+certificate as the `response_certificate` dispatch input. Keep its private key
+locally; never commit or upload it. The script verifies encryption before
+submission, then captures every response header (including duplicate names) and
+the entire body without trimming. Body bytes are stored losslessly as base64 in
+a JSON envelope with the HTTP status and byte length. OpenSSL CMS encrypts the
+envelope before it reaches the `cloud-sbom-*` artifact, as
+`completion-response.json.p7m`; no plaintext diagnostic file is written. Existing
+allowlisted public logging is unchanged. Decrypt locally with
+`openssl cms -decrypt -binary -inform DER -in completion-response.json.p7m -recip recipient.pem -inkey recipient.key -out completion-response.json`.
+Inspect raw diagnostics privately for credentials before sharing. Only the
+completion response is captured, never token requests or allocation SAS URLs.
+
 Local contract tests: `python -m unittest discover -s scripts -p test_submit_sbom.py`.
 
 ### Reusable post-build SBOM action

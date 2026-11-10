@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,7 +37,7 @@ class TransportError(RuntimeError):
     pass
 
 
-def request(method, url, headers=None, data=None, timeout=90):
+def request(method, url, headers=None, data=None, timeout=90, complete_body=False):
     req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
     opener = urllib.request.build_opener(NoRedirect)
     try:
@@ -46,8 +48,8 @@ def request(method, url, headers=None, data=None, timeout=90):
         raise TransportError("HTTP transport failed; request details withheld.") from None
     try:
         with response:
-            body = response.read(MAX_BYTES + 1)
-            if len(body) > MAX_BYTES:
+            body = response.read() if complete_body else response.read(MAX_BYTES + 1)
+            if not complete_body and len(body) > MAX_BYTES:
                 raise TransportError("HTTP response exceeded the diagnostic size limit.")
             return response.code, response.headers, body
     except (OSError, ValueError, http.client.HTTPException):
@@ -275,6 +277,38 @@ def evidence(path, result):
             output.write("\nSubmission does not confirm downstream graph materialization.\n")
 
 
+def encrypt_diagnostics(certificate, payload):
+    with tempfile.TemporaryDirectory(prefix="sbom-diagnostics-") as directory:
+        cert_path = Path(directory) / "recipient.pem"
+        cert_path.write_text(certificate, encoding="ascii")
+        try:
+            result = subprocess.run(
+                [
+                    "openssl", "cms", "-encrypt", "-binary", "-aes-256-cbc",
+                    "-outform", "DER", str(cert_path),
+                ],
+                input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeError("Encrypted diagnostic capture requires working OpenSSL CMS.") from None
+    if result.returncode != 0:
+        raise RuntimeError("Diagnostic encryption failed; verify the recipient certificate.")
+    return result.stdout
+
+
+def capture_response(path, certificate, status, headers, body):
+    header_pairs = list(headers.raw_items()) if hasattr(headers, "raw_items") else list(headers.items())
+    payload = {
+        "statusCode": status,
+        "headers": header_pairs,
+        "bodyBase64": base64.b64encode(body).decode("ascii"),
+        "bodyByteLength": len(body),
+    }
+    encrypted = encrypt_diagnostics(certificate, json.dumps(payload).encode("utf-8"))
+    path.write_bytes(encrypted)
+    print("Complete HTTP response retained in encrypted diagnostics; no body or header fields removed.")
+
+
 def preflight():
     try:
         status, _, _ = request("POST", API_BASE + "/api/aspm/scanning/sbom/uploads", timeout=30)
@@ -293,6 +327,10 @@ def submit(sbom_path, image, evidence_path):
         raise ValueError("SBOM exceeds 10 MiB.")
     raw = sbom_path.read_bytes()
     validate_sbom(raw, image)
+    certificate = os.environ.get("SBOM_RESPONSE_CERTIFICATE", "")
+    if certificate:
+        # Fail before any submission if diagnostics cannot be encrypted.
+        encrypt_diagnostics(certificate, b"diagnostic encryption preflight")
     state = {"imageId": image, "phase": "allocation", "acceptance": "not_attempted"}
     evidence(evidence_path, state)
     token = oidc_token()
@@ -341,9 +379,10 @@ def submit(sbom_path, image, evidence_path):
     state.update(phase="completion", acceptance="unknown")
     evidence(evidence_path, state)
     try:
-        status, _, body = request(
+        status, headers, body = request(
             "POST", API_BASE + "/api/aspm/scanning/sbom/uploads/" + upload_id + "/complete",
             {"Authorization": "Bearer " + token, "Content-Type": "application/json"}, payload,
+            complete_body=bool(certificate),
         )
     except TransportError:
         raise RuntimeError(
@@ -351,6 +390,11 @@ def submit(sbom_path, image, evidence_path):
             "saved correlation IDs. Do not retry automatically."
         ) from None
     state["httpStatus"] = status
+    if certificate:
+        capture_response(
+            evidence_path.with_name("completion-response.json.p7m"),
+            certificate, status, headers, body,
+        )
     try:
         result = object_json(body)
     except ValueError:

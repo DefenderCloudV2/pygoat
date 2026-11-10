@@ -1,6 +1,7 @@
 import contextlib
 import base64
 import copy
+from email.message import Message
 import http.client
 import io
 import json
@@ -37,6 +38,7 @@ class SubmissionTests(unittest.TestCase):
         self.console = io.StringIO()
         self.addCleanup(patch.stopall)
         patch.dict("os.environ", {"GITHUB_STEP_SUMMARY": ""}).start()
+        patch.dict("os.environ", {"SBOM_RESPONSE_CERTIFICATE": ""}).start()
         patch("submit_sbom.mask").start()
 
     def responses(self, completion=None):
@@ -195,6 +197,59 @@ class SubmissionTests(unittest.TestCase):
         self.assertTrue(result["githubActionsIssuerRejected"])
         self.assertTrue(result["serverIssuerAllowlistMissing"])
         self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_complete_response_capture_is_lossless_and_encrypted(self):
+        headers = Message()
+        headers.add_header("Set-Cookie", "first=private")
+        headers.add_header("Set-Cookie", "second=private")
+        headers.add_header("Content-Type", "application/json")
+        body = b'{"detail":"unmodified\\r\\ncontent"}\r\n\xff'
+        encrypted_path = Path(self.temp.name) / "completion-response.json.p7m"
+        with patch("submit_sbom.encrypt_diagnostics", return_value=b"encrypted") as encrypt:
+            with contextlib.redirect_stdout(self.console):
+                client.capture_response(encrypted_path, "certificate", 502, headers, body)
+        payload = json.loads(encrypt.call_args.args[1])
+        self.assertEqual(payload["headers"], list(map(list, headers.raw_items())))
+        self.assertEqual(base64.b64decode(payload["bodyBase64"]), body)
+        self.assertEqual(payload["bodyByteLength"], len(body))
+        self.assertEqual(payload["statusCode"], 502)
+        self.assertEqual(encrypted_path.read_bytes(), b"encrypted")
+        self.assertNotIn("unmodified", self.console.getvalue())
+
+    def test_capture_happens_before_non_json_failure_without_retry(self):
+        with patch.dict("os.environ", {"SBOM_RESPONSE_CERTIFICATE": "certificate"}):
+            with patch("submit_sbom.encrypt_diagnostics", return_value=b"encrypted") as encrypt:
+                with patch("submit_sbom.oidc_token", return_value="token"):
+                    with patch("submit_sbom.request", side_effect=self.responses((502, {}, b"raw error"))) as http:
+                        with contextlib.redirect_stdout(self.console):
+                            with self.assertRaises(RuntimeError):
+                                client.submit(self.sbom, IMAGE, self.output)
+        self.assertEqual(http.call_count, 3)
+        self.assertTrue(http.call_args.kwargs["complete_body"])
+        self.assertEqual(encrypt.call_count, 2)
+        self.assertEqual(
+            base64.b64decode(json.loads(encrypt.call_args.args[1])["bodyBase64"]), b"raw error"
+        )
+        self.assertEqual((self.output.parent / "completion-response.json.p7m").read_bytes(), b"encrypted")
+
+    def test_encryption_failure_stops_before_network_requests(self):
+        with patch.dict("os.environ", {"SBOM_RESPONSE_CERTIFICATE": "invalid certificate"}):
+            with patch("submit_sbom.encrypt_diagnostics", side_effect=RuntimeError("encryption failed")):
+                with patch("submit_sbom.request") as http:
+                    with self.assertRaises(RuntimeError):
+                        client.submit(self.sbom, IMAGE, self.output)
+        http.assert_not_called()
+
+    def test_full_response_is_not_subject_to_summary_size_limit(self):
+        with patch("urllib.request.OpenerDirector.open") as open_request:
+            response = open_request.return_value
+            response.code = 502
+            response.headers = {}
+            response.read.return_value = b"x" * (client.MAX_BYTES + 1)
+            status, _, raw = client.request("POST", "https://example.com/", complete_body=True)
+        self.assertEqual(status, 502)
+        self.assertEqual(len(raw), client.MAX_BYTES + 1)
+        response.read.assert_called_once_with()
 
     def test_redirects_cannot_forward_credentials(self):
         self.assertIsNone(client.NoRedirect().redirect_request(None, None, 302, "", {}, "https://elsewhere"))

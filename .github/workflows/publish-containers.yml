@@ -12,6 +12,10 @@ on:
           - registries
           - ghcr-sbom
         default: registries
+      response_certificate:
+        description: Optional public PEM certificate for complete encrypted HTTP response diagnostics
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -256,6 +260,7 @@ jobs:
       - name: Submit CycloneDX to staging without completion retries
         env:
           IMAGE_ID: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          SBOM_RESPONSE_CERTIFICATE: ${{ inputs.response_certificate }}
         run: |
           python3 scripts/submit_sbom.py \
             --sbom "$RUNNER_TEMP/cloud-sbom/sbom.cdx.json" \
