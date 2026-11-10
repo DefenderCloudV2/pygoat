@@ -133,6 +133,51 @@ generates SBOM artifacts; it does not deploy PyGoat.
 **PyGoat is intentionally vulnerable. Use these images only in an isolated
 learning environment, never in production.**
 
+### GHCR image and cloud CycloneDX submission
+
+The same publishing workflow has a separate manual `ghcr-sbom` mode. It can run
+on a development branch without changing the existing master release job:
+
+```sh
+gh workflow run publish-containers.yml --repo DefenderCloudV2/pygoat --ref BRANCH -f mode=ghcr-sbom
+gh run list --repo DefenderCloudV2/pygoat --workflow publish-containers.yml
+gh run watch RUN_ID --repo DefenderCloudV2/pygoat --exit-status
+```
+
+This mode first requires an unauthenticated HTTP 401 from the staging API at
+`https://aspm-externalapi-stg-eus.internal.mdatp.microsoft-int.com`. It currently
+tries `ubuntu-latest`; public hosted runners are **not guaranteed** to reach that
+internal endpoint. If connectivity fails, publishing stops before building and
+an approved private-network runner is needed. It does not configure a networking
+bypass or deploy the application.
+
+On a connected runner it publishes `ghcr.io/defendercloudv2/pygoat` using a unique
+`sbom-COMMIT-RUN_ID-RUN_ATTEMPT` tag, verifies the real registry digest, and uses
+pinned Syft to scan that exact digest for a complete, uncompressed CycloneDX JSON
+SBOM. It does not move `latest`, publish to ACR, or change package visibility.
+`scripts/submit_sbom.py` checks the API's format and structural limits, acquires
+GitHub OIDC with audience `api://aspm-scanning-sbom-staging`, allocates an upload,
+PUTs the raw bytes to the returned Azure Blob SAS URL, preserves the quoted ETag,
+refreshes OIDC, and completes using the digest-only image reference. No Azure
+login, storage keys, or EKG credentials are required.
+
+The `cloud-sbom-RUN_ID-RUN_ATTEMPT` artifact contains the CycloneDX SBOM, immutable
+image identity, and an allowlisted response summary. Public logs and summaries
+retain HTTP/upstream status, correlation IDs, counts, warning presence, and known
+skip reason codes, **not** raw API/upstream bodies, headers, free-text warnings,
+tokens, allocation responses, or SAS URLs. Skipped components produce a warning;
+they are not silently removed from the submitted SBOM or automatically retried.
+
+HTTP 200 with `status: submitted` means the SDK submission succeeded, not that
+the graph has materialized. Staging sends data to EKG DEV. Completion is never
+automatically retried: after timeout, connection loss, non-JSON completion, or an
+ambiguous upstream failure, reconcile the saved upload/ingestion/trace IDs through
+approved service diagnostics before any rerun. A workflow rerun can resubmit an
+already accepted snapshot; the upload ID is not an idempotency key. Workflow runs
+are serialized without cancelling an active run.
+
+Local contract tests: `python -m unittest discover -s scripts -p test_submit_sbom.py`.
+
 ### Reusable post-build SBOM action
 
 All six image-building workflows use `.github/actions/runner-image-sbom`.

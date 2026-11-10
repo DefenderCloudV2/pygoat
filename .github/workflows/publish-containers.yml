@@ -4,6 +4,14 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Publication mode (cloud submission requires internal API connectivity)
+        type: choice
+        options:
+          - registries
+          - ghcr-sbom
+        default: registries
 
 permissions:
   contents: read
@@ -19,7 +27,7 @@ defaults:
 jobs:
   publish:
     name: Build once and publish to both registries
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' && inputs.mode != 'ghcr-sbom'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -160,3 +168,102 @@ jobs:
       - name: Generate SBOMs for all runner images
         if: ${{ !cancelled() }}
         uses: ./.github/actions/runner-image-sbom
+
+  ghcr-sbom:
+    name: Publish GHCR image and submit CycloneDX to staging
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'ghcr-sbom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Verify submission contract tests
+        run: python3 -m unittest discover -s scripts -p test_submit_sbom.py
+
+      - name: Check staging API connectivity before publishing
+        run: python3 scripts/submit_sbom.py --preflight
+
+      - name: Select immutable publication tag
+        id: image
+        run: |
+          set -euo pipefail
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sbom-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/cloud-sbom"
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push GHCR image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify registry digest and record identity
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAG: ${{ steps.image.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          actual=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manifest.Digest}}')
+          test "$actual" = "$DIGEST"
+          jq -n --arg image "$IMAGE@$DIGEST" --arg tag "$TAG" --arg commit "$GITHUB_SHA" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{imageId: $image, tag: $tag, commit: $commit, run: $run}' \
+            > "$RUNNER_TEMP/cloud-sbom/image.json"
+
+      - name: Generate complete CycloneDX from the published digest
+        id: sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: registry:${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          syft-version: v1.55.0
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/cloud-sbom/sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Submit CycloneDX to staging without completion retries
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+        run: |
+          python3 scripts/submit_sbom.py \
+            --sbom "$RUNNER_TEMP/cloud-sbom/sbom.cdx.json" \
+            --image "$IMAGE_ID" \
+            --evidence "$RUNNER_TEMP/cloud-sbom/response.json"
+
+      - name: Retain CycloneDX and sanitized response evidence
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cloud-sbom-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cloud-sbom/
+          if-no-files-found: error
+          retention-days: 30
