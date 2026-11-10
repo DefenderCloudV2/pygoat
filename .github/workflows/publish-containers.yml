@@ -241,6 +241,9 @@ jobs:
       - name: Generate complete CycloneDX from the published digest
         id: sbom
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        env:
+          # Keep all packages without emitting a component for every owned file.
+          SYFT_FILE_METADATA_SELECTION: none
         with:
           image: registry:${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           syft-version: v1.55.0

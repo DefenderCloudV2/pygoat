@@ -154,7 +154,9 @@ bypass or deploy the application.
 On a connected runner it publishes `ghcr.io/defendercloudv2/pygoat` using a unique
 `sbom-COMMIT-RUN_ID-RUN_ATTEMPT` tag, verifies the real registry digest, and uses
 pinned Syft to scan that exact digest for a complete, uncompressed CycloneDX JSON
-SBOM. It does not move `latest`, publish to ACR, or change package visibility.
+package SBOM. Syft's optional per-file metadata inventory is disabled so files do
+not exhaust the API's 2,000-component limit; no discovered packages are filtered.
+It does not move `latest`, publish to ACR, or change package visibility.
 `scripts/submit_sbom.py` checks the API's format and structural limits, acquires
 GitHub OIDC with audience `api://aspm-scanning-sbom-staging`, allocates an upload,
 PUTs the raw bytes to the returned Azure Blob SAS URL, preserves the quoted ETag,
