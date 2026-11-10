@@ -1,4 +1,5 @@
 import contextlib
+import base64
 import copy
 import http.client
 import io
@@ -134,15 +135,44 @@ class SubmissionTests(unittest.TestCase):
             self.assertLess(http.call_count, 3)
 
     def test_oidc_exact_audience_and_no_token_logging(self):
+        claims = {
+            "iss": "https://token.actions.githubusercontent.com",
+            "aud": client.AUDIENCE, "repository": "DefenderCloudV2/pygoat",
+            "repository_id": "1356696257", "repository_owner_id": "324759237",
+            "nbf": 0, "exp": 4070908800,
+        }
+        token = "header." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode() + ".signature"
         with patch.dict("os.environ", {
             "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.com/token?a=1&audience=old",
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-credential",
         }):
-            with patch("submit_sbom.request", return_value=(200, {}, b'{"value":"a.b.c"}')) as http:
-                self.assertEqual(client.oidc_token(), "a.b.c")
+            with patch("submit_sbom.request", return_value=(
+                200, {}, json.dumps({"value": token}).encode()
+            )) as http:
+                with contextlib.redirect_stdout(self.console):
+                    self.assertEqual(client.oidc_token(), token)
         parsed = urllib.parse.urlsplit(http.call_args.args[1])
         self.assertEqual(urllib.parse.parse_qs(parsed.query)["audience"], [client.AUDIENCE])
         self.assertEqual(http.call_args.args[2]["Authorization"], "Bearer request-credential")
+
+    def test_oidc_rejects_mismatched_claims(self):
+        with patch.dict("os.environ", {
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.com/token",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "credential",
+        }):
+            with patch("submit_sbom.request", return_value=(200, {}, b'{"value":"a.e30.c"}')):
+                with self.assertRaisesRegex(ValueError, "claims/lifetime"):
+                    client.oidc_token()
+
+    def test_authentication_diagnostics_are_allowlisted(self):
+        result = client.safe_http_diagnostics({
+            "WWW-Authenticate": 'Bearer error="invalid_token", error_description="signature ' + SECRET + '"',
+            "Date": "Tue, 10 Nov 2026 16:37:46 GMT",
+        }, b'{"traceId":"trace-123","detail":"' + SECRET.encode() + b'"}')
+        self.assertEqual(result["authenticationError"], "invalid_token")
+        self.assertEqual(result["authenticationHints"], ["signature"])
+        self.assertEqual(result["traceId"], "trace-123")
+        self.assertNotIn(SECRET, json.dumps(result))
 
     def test_preflight_requires_authenticated_route_and_handles_network_failure(self):
         for response in ((401, {}, b""), (200, {}, b""), client.TransportError("secret")):

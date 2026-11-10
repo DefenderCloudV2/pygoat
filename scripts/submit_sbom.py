@@ -1,7 +1,9 @@
 """Submit an immutable image's CycloneDX SBOM without exposing credentials."""
 
 import argparse
+import base64
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import http.client
 import json
 import os
@@ -86,6 +88,29 @@ def oidc_token():
     if not isinstance(token, str) or len(token.split(".")) != 3:
         raise ValueError("GitHub returned an invalid OIDC token.")
     mask(token)
+    try:
+        payload = token.split(".")[1]
+        claims = object_json(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        expected = {
+            "iss": "https://token.actions.githubusercontent.com",
+            "aud": AUDIENCE,
+            "repository": "DefenderCloudV2/pygoat",
+            "repository_id": "1356696257",
+            "repository_owner_id": "324759237",
+        }
+        now = datetime.now(timezone.utc).timestamp()
+        if any(claims.get(key) != value for key, value in expected.items()):
+            raise ValueError()
+        if not all(type(claims.get(key)) in (int, float) for key in ("nbf", "exp")):
+            raise ValueError()
+        if not claims["nbf"] <= now < claims["exp"]:
+            raise ValueError()
+    except (ValueError, UnicodeError):
+        raise ValueError("OIDC payload does not match the staging claims/lifetime contract.") from None
+    print(
+        "OIDC payload matches staging issuer, audience, repository and owner IDs, "
+        "and current lifetime. Signature verification remains the API's responsibility."
+    )
     return token
 
 
@@ -197,6 +222,31 @@ def safe_response(result):
     return safe
 
 
+def safe_http_diagnostics(headers, body):
+    diagnostics = {}
+    try:
+        diagnostics.update(safe_response(object_json(body)))
+    except ValueError:
+        pass
+    challenge = headers.get("WWW-Authenticate", "")
+    match = re.search(r'\berror="([^"]+)"', challenge)
+    if match and match[1] in ("invalid_token", "invalid_request", "insufficient_scope"):
+        diagnostics["authenticationError"] = match[1]
+    categories = {
+        "audience": "audience", "issuer": "issuer", "signature": "signature",
+        "expired": "lifetime", "lifetime": "lifetime", "signing key": "signing_key",
+    }
+    hints = sorted({category for word, category in categories.items() if word in challenge.lower()})
+    if hints:
+        diagnostics["authenticationHints"] = hints
+    if headers.get("Date"):
+        try:
+            diagnostics["serverDate"] = parsedate_to_datetime(headers["Date"]).isoformat()
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return diagnostics
+
+
 def evidence(path, result):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -230,11 +280,12 @@ def submit(sbom_path, image, evidence_path):
     state = {"imageId": image, "phase": "allocation", "acceptance": "not_attempted"}
     evidence(evidence_path, state)
     token = oidc_token()
-    status, _, body = request(
+    status, headers, body = request(
         "POST", API_BASE + "/api/aspm/scanning/sbom/uploads",
         {"Authorization": "Bearer " + token},
     )
     if status != 201:
+        state.update(safe_http_diagnostics(headers, body))
         state["httpStatus"] = status
         evidence(evidence_path, state)
         raise RuntimeError("Upload allocation failed: HTTP %s." % status)

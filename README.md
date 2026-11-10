@@ -169,6 +169,10 @@ retain HTTP/upstream status, correlation IDs, counts, warning presence, and know
 skip reason codes, **not** raw API/upstream bodies, headers, free-text warnings,
 tokens, allocation responses, or SAS URLs. Skipped components produce a warning;
 they are not silently removed from the submitted SBOM or automatically retried.
+Before allocation, the client checks the OIDC payload's expected issuer,
+audience, repository/owner IDs, and lifetime without logging the token or claims.
+The API still performs signature verification. Allocation failures retain only
+allowlisted authentication error categories, server time, and correlation data.
 
 HTTP 200 with `status: submitted` means the SDK submission succeeded, not that
 the graph has materialized. Staging sends data to EKG DEV. Completion is never
